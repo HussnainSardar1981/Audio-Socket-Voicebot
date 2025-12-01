@@ -18,7 +18,7 @@ from vosk_asr import VoskASR
 from audio_utils import resample_8khz_to_16khz
 from config_audiosocket import (
     AudioSocketConfig, AudioConfig, ConversationState,
-    TurnTakingConfig, LLMConfig
+    TurnTakingConfig, LLMConfig, TEMP_DIR
 )
 
 # Kokoro TTS imports
@@ -100,10 +100,13 @@ class KokoroTTS:
             # Concatenate chunks
             full_audio = np.concatenate(audio_chunks)
 
-            # Generate unique temp filenames (MATCH AGI naming)
+            # Create temp directory if it doesn't exist
+            TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+            # Generate unique temp filenames (use project temp dir, not /tmp)
             unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
-            temp_24k = f"/tmp/kokoro_temp_{unique_id}.wav"
-            temp_8k = f"/tmp/kokoro_tts_{unique_id}.wav"
+            temp_24k = str(TEMP_DIR / f"kokoro_temp_{unique_id}.wav")
+            temp_8k = str(TEMP_DIR / f"kokoro_tts_{unique_id}.wav")
 
             # Save at native sample rate (24kHz) - EXACT AGI approach
             sf.write(temp_24k, full_audio, 24000, subtype='PCM_16')
