@@ -15,7 +15,7 @@ from datetime import datetime
 from audio_socket_server import AudioSocketServer, AudioSocketConnection
 from vad_processor import VADProcessor
 from vosk_asr import VoskASR
-from audio_utils import resample_audio
+from audio_utils import resample_8khz_to_16khz
 from config_audiosocket import (
     AudioSocketConfig, AudioConfig, ConversationState,
     TurnTakingConfig, LLMConfig
@@ -63,7 +63,8 @@ class KokoroTTS:
 
     def synthesize(self, text: str, voice: str = 'af_sky') -> bytes:
         """
-        Synthesize speech from text.
+        Synthesize speech from text using Kokoro TTS.
+        Uses sox for high-quality 24kHz -> 8kHz resampling (same as AGI).
 
         Args:
             text: Text to synthesize
@@ -72,11 +73,19 @@ class KokoroTTS:
         Returns:
             PCM audio data at 8kHz (int16 LE)
         """
+        import subprocess
+        import uuid
+        import time
+        import os
+
+        temp_24k = None
+        temp_8k = None
+
         try:
             # Map voice
             kokoro_voice = self.voice_mapping.get(voice, "af_heart")
 
-            # Generate audio using KPipeline (yields chunks)
+            # Generate audio using KPipeline (yields chunks at 24kHz)
             generator = self.pipeline(text, voice=kokoro_voice)
 
             # Collect audio chunks
@@ -91,11 +100,32 @@ class KokoroTTS:
             # Concatenate chunks
             full_audio = np.concatenate(audio_chunks)
 
-            # Kokoro outputs 24kHz float32, convert to int16
-            audio_24khz_int16 = (full_audio * 32767).astype(np.int16)
+            # Save 24kHz audio to temp file
+            unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+            temp_24k = f"/tmp/kokoro_24k_{unique_id}.wav"
+            temp_8k = f"/tmp/kokoro_8k_{unique_id}.wav"
 
-            # Resample 24kHz -> 8kHz for AudioSocket (3:1 decimation)
-            audio_8khz = audio_24khz_int16[::3]
+            # Write 24kHz WAV file
+            sf.write(temp_24k, full_audio, 24000, subtype='PCM_16')
+
+            # Use sox for high-quality resampling (same as AGI)
+            sox_cmd = [
+                'sox', temp_24k,
+                '-r', '8000',              # 8kHz sample rate
+                '-c', '1',                 # Mono
+                '-b', '16',                # 16-bit
+                '-e', 'signed-integer',    # PCM signed integer
+                temp_8k
+            ]
+
+            result = subprocess.run(sox_cmd, capture_output=True, text=True, timeout=10)
+
+            if result.returncode != 0:
+                logger.error(f"Sox resampling failed: {result.stderr}")
+                return b''
+
+            # Read resampled audio
+            audio_8khz, sr = sf.read(temp_8k, dtype='int16')
 
             # Convert to bytes
             return audio_8khz.tobytes()
@@ -103,6 +133,15 @@ class KokoroTTS:
         except Exception as e:
             logger.error(f"Kokoro TTS error: {e}", exc_info=True)
             return b''
+
+        finally:
+            # Cleanup temp files
+            for temp_file in [temp_24k, temp_8k]:
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except Exception as e:
+                        logger.debug(f"Cleanup failed for {temp_file}: {e}")
 
 
 class OllamaLLM:
@@ -311,11 +350,7 @@ class AudioSocketVoicebot:
                 return
 
             # Resample 8kHz -> 16kHz for Vosk
-            speech_16khz = resample_audio(
-                speech_8khz,
-                orig_sample_rate=8000,
-                target_sample_rate=16000
-            )
+            speech_16khz = resample_8khz_to_16khz(speech_8khz)
 
             # Transcribe with Vosk
             logger.info("Transcribing speech...")
