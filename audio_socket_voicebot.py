@@ -17,10 +17,13 @@ from audio_utils import resample_8khz_to_16khz
 from kokoro_tts_audiosocket import KokoroTTSClient
 from ollama_audiosocket import OllamaClient
 from model_warmup import SharedModels, load_models
+from dtmf_detector import DTMFDetector
 from config_audiosocket import (
     AudioSocketConfig, AudioConfig, ConversationState,
-    TurnTakingConfig, LLMConfig
+    TurnTakingConfig, LLMConfig, ZabbixConfig
 )
+import requests
+import time
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -295,6 +298,170 @@ class AudioSocketVoicebot:
             logger.error(f"Error speaking: {e}", exc_info=True)
             self.state = ConversationState.IDLE
 
+    async def start_alert_call(self, call_id: str):
+        """
+        Handle Zabbix alert call with DTMF response
+
+        Args:
+            call_id: Zabbix alert call ID
+        """
+        try:
+            logger.info(f"🚨 Starting Zabbix alert call: {call_id}")
+
+            # Query Zabbix server for alert data
+            alert_data = await self._get_alert_data(call_id)
+            if not alert_data:
+                logger.error(f"Failed to get alert data for {call_id}")
+                await self._speak("Alert data unavailable. Please contact support.")
+                return
+
+            # Log alert details
+            logger.info(f"Alert ID: {alert_data['alert_id']}")
+            logger.info(f"Hostname: {alert_data['hostname']}")
+            logger.info(f"Trigger: {alert_data['trigger']}")
+            logger.info(f"Severity: {alert_data['severity']}")
+
+            # Create alert message
+            alert_message = (
+                f"Hello, this is Alexis from Netovo monitoring. "
+                f"We have a {alert_data['severity']} severity alert on {alert_data['hostname']}: "
+                f"{alert_data['trigger']}. "
+                f"Press 1 to acknowledge this alert, or press 2 if you are not available."
+            )
+
+            # Speak alert message
+            await self._speak(alert_message, voice_type="technical")
+
+            # Wait for DTMF response
+            logger.info("Waiting for DTMF response...")
+            dtmf_digit = await self._wait_for_dtmf(timeout=ZabbixConfig.DTMF_WAIT_TIMEOUT)
+
+            # Process DTMF response
+            if dtmf_digit == '1':
+                logger.info(f"✅ Alert {alert_data['alert_id']} acknowledged")
+                response_msg = "Alert acknowledged. Thank you. A support ticket will be created for tracking."
+                await self._send_dtmf_response(call_id, alert_data['alert_id'], '1')
+
+            elif dtmf_digit == '2':
+                logger.info(f"❌ Technician not available for {alert_data['alert_id']}")
+                response_msg = "Understood. This alert will be escalated to the manager."
+                await self._send_dtmf_response(call_id, alert_data['alert_id'], '2')
+
+            else:
+                logger.warning(f"⚠️ No valid DTMF response for {alert_data['alert_id']}")
+                response_msg = "No response received. This alert will be escalated."
+                # Don't send DTMF response if none received
+
+            # Speak confirmation
+            await self._speak(response_msg, voice_type="default")
+
+            logger.info(f"🚨 Alert call completed: {call_id}")
+
+        except Exception as e:
+            logger.error(f"Error handling alert call: {e}", exc_info=True)
+
+    async def _get_alert_data(self, call_id: str) -> Optional[dict]:
+        """Query Zabbix alert server for alert data"""
+        try:
+            url = f"{ZabbixConfig.ALERT_SERVER_URL}/alert-data/{call_id}"
+            response = await asyncio.to_thread(
+                requests.get,
+                url,
+                timeout=5
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('status') == 'success':
+                    return data.get('alert_data')
+                else:
+                    logger.error(f"Alert server error: {data.get('error')}")
+                    return None
+            else:
+                logger.error(f"Failed to get alert data: HTTP {response.status_code}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error querying alert data: {e}")
+            return None
+
+    async def _wait_for_dtmf(self, timeout: int = 30) -> Optional[str]:
+        """
+        Wait for DTMF tone from user
+
+        Args:
+            timeout: Timeout in seconds
+
+        Returns:
+            Detected DTMF digit or None
+        """
+        try:
+            # Create DTMF detector
+            dtmf_detector = DTMFDetector(
+                sample_rate=ZabbixConfig.DTMF_SAMPLE_RATE,
+                frame_duration_ms=ZabbixConfig.DTMF_FRAME_DURATION_MS
+            )
+            dtmf_detector.energy_threshold = ZabbixConfig.DTMF_ENERGY_THRESHOLD
+            dtmf_detector.tone_threshold = ZabbixConfig.DTMF_TONE_THRESHOLD
+            dtmf_detector.min_tone_duration_ms = ZabbixConfig.DTMF_MIN_DURATION_MS
+
+            detected_digit = None
+            start_time = time.time()
+
+            # Temporary audio callback for DTMF detection
+            def dtmf_callback(pcm_data: bytes):
+                nonlocal detected_digit
+                digit = dtmf_detector.process_frame(pcm_data)
+                if digit:
+                    detected_digit = digit
+
+            # Set DTMF callback
+            old_callback = self.connection.on_audio_received
+            self.connection.on_audio_received = dtmf_callback
+
+            # Wait for DTMF or timeout
+            while detected_digit is None and (time.time() - start_time) < timeout:
+                await asyncio.sleep(0.1)
+
+            # Restore original callback
+            self.connection.on_audio_received = old_callback
+
+            if detected_digit:
+                logger.info(f"📱 DTMF detected: {detected_digit}")
+            else:
+                logger.warning(f"⏱️ DTMF timeout after {timeout}s")
+
+            return detected_digit
+
+        except Exception as e:
+            logger.error(f"Error waiting for DTMF: {e}", exc_info=True)
+            return None
+
+    async def _send_dtmf_response(self, call_id: str, alert_id: str, dtmf_response: str):
+        """Send DTMF response to Zabbix alert server"""
+        try:
+            url = f"{ZabbixConfig.ALERT_SERVER_URL}/dtmf-response"
+            data = {
+                'call_id': call_id,
+                'dtmf_response': dtmf_response,
+                'alert_id': alert_id
+            }
+
+            response = await asyncio.to_thread(
+                requests.post,
+                url,
+                json=data,
+                timeout=5
+            )
+
+            if response.status_code == 200:
+                logger.info(f"✅ DTMF response sent to alert server: {dtmf_response}")
+            else:
+                logger.warning(f"⚠️ Alert server responded with HTTP {response.status_code}")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to send DTMF response: {e}")
+
 
 async def main():
     """Main entry point"""
@@ -308,11 +475,35 @@ async def main():
         """Handle new AudioSocket connection"""
         logger.info(f"New call from {connection.peer_address}")
 
-        # Create voicebot for this connection
-        voicebot = AudioSocketVoicebot(connection)
+        # Wait briefly for UUID message from Asterisk
+        async def handle_voicebot():
+            # Give time for UUID to be received
+            await asyncio.sleep(0.2)
 
-        # Start voicebot in background
-        asyncio.create_task(voicebot.start())
+            # Create voicebot for this connection
+            voicebot = AudioSocketVoicebot(connection)
+
+            # Check if this is a Zabbix alert call
+            call_id = None
+            if connection.session_uuid:
+                try:
+                    uuid_str = connection.session_uuid.decode('utf-8', errors='ignore')
+                    if uuid_str.startswith(ZabbixConfig.ALERT_CALL_ID_PREFIX):
+                        call_id = uuid_str
+                        logger.info(f"🚨 ZABBIX ALERT CALL detected: {call_id}")
+                except:
+                    pass
+
+            # Route to appropriate handler
+            if call_id:
+                # Zabbix alert call
+                await voicebot.start_alert_call(call_id)
+            else:
+                # Normal customer call
+                await voicebot.start()
+
+        # Start voicebot handler in background
+        asyncio.create_task(handle_voicebot())
 
     # Create and start server
     server = AudioSocketServer(
