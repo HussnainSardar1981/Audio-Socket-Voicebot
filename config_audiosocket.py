@@ -31,7 +31,7 @@ class AudioConfig:
     # VAD configuration
     VAD_SAMPLE_RATE = 8000  # Matches AudioSocket
     VAD_FRAME_DURATION_MS = 20
-    VAD_AGGRESSIVENESS = 3  # 0-3, higher = more aggressive
+    VAD_AGGRESSIVENESS = 0  # 0-3, 0 = least aggressive (was 1, still detecting channel noise)
 
 
 class TurnTakingConfig:
@@ -40,10 +40,13 @@ class TurnTakingConfig:
     INTERRUPTION_ENERGY_THRESHOLD = 300
     INTERRUPTION_CONSECUTIVE_FRAMES = 3  # 60ms of speech to interrupt
 
+    # VAD pre-filtering (reject channel noise before VAD)
+    VAD_ENERGY_THRESHOLD = 50  # RMS energy threshold to filter background noise
+
 
 class LLMConfig:
     """LLM configuration (REUSED)"""
-    MODEL_NAME = "llama3.2"
+    MODEL_NAME = "llama3.1:8b"
     BASE_URL = "http://localhost:11434"
     TIMEOUT = 30
 
