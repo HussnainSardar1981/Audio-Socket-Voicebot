@@ -90,6 +90,15 @@ class AudioSocketConnection:
                     logger.info("Received TERMINATE message")
                     break
 
+                elif message.msg_type == MessageType.UUID:
+                    # Asterisk sent us a UUID (from dialplan)
+                    self.session_uuid = message.payload
+                    try:
+                        uuid_str = message.payload.decode('utf-8', errors='ignore')
+                        logger.info(f"Received UUID from Asterisk: {uuid_str}")
+                    except:
+                        logger.info(f"Received UUID from Asterisk (binary): {message.payload.hex()}")
+
                 elif message.msg_type == MessageType.ERROR:
                     error_code = message.payload[0] if message.payload else 0
                     logger.warning(f"Received ERROR: code={error_code}")
