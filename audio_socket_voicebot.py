@@ -64,7 +64,7 @@ class KokoroTTS:
     def synthesize(self, text: str, voice: str = 'af_sky') -> bytes:
         """
         Synthesize speech from text using Kokoro TTS.
-        Uses sox for high-quality 24kHz -> 8kHz resampling (same as AGI).
+        Uses sox for high-quality 24kHz -> 8kHz resampling (EXACT AGI approach).
 
         Args:
             text: Text to synthesize
@@ -77,7 +77,6 @@ class KokoroTTS:
         import uuid
         import time
         import os
-        import struct
 
         temp_24k = None
         temp_8k = None
@@ -101,51 +100,51 @@ class KokoroTTS:
             # Concatenate chunks
             full_audio = np.concatenate(audio_chunks)
 
-            # Convert float32 to int16 PCM
-            audio_24khz_int16 = (full_audio * 32767).astype(np.int16)
-
-            # Generate unique temp filenames
+            # Generate unique temp filenames (MATCH AGI naming)
             unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
-            temp_24k = f"/tmp/kokoro_24k_{unique_id}.raw"
-            temp_8k = f"/tmp/kokoro_8k_{unique_id}.raw"
+            temp_24k = f"/tmp/kokoro_temp_{unique_id}.wav"
+            temp_8k = f"/tmp/kokoro_tts_{unique_id}.wav"
 
-            # Write raw PCM file (bypass soundfile issues)
-            with open(temp_24k, 'wb') as f:
-                f.write(audio_24khz_int16.tobytes())
+            # Save at native sample rate (24kHz) - EXACT AGI approach
+            sf.write(temp_24k, full_audio, 24000, subtype='PCM_16')
 
-            logger.debug(f"Wrote 24kHz raw PCM: {len(audio_24khz_int16)} samples")
+            logger.debug(f"Generated audio: {len(full_audio)} samples at 24000Hz")
 
-            # Use sox for high-quality resampling (same as AGI)
-            # Input: raw 24kHz mono 16-bit signed
-            # Output: raw 8kHz mono 16-bit signed
+            # Convert to 8kHz using sox (EXACT AGI command)
             sox_cmd = [
-                'sox',
-                '-t', 'raw',               # Input type: raw PCM
-                '-r', '24000',             # Input sample rate: 24kHz
-                '-e', 'signed-integer',    # Input encoding
-                '-b', '16',                # Input bit depth
-                '-c', '1',                 # Input channels: mono
-                temp_24k,                  # Input file
-                '-t', 'raw',               # Output type: raw PCM
-                '-r', '8000',              # Output sample rate: 8kHz
-                '-e', 'signed-integer',    # Output encoding
-                '-b', '16',                # Output bit depth
-                '-c', '1',                 # Output channels: mono
-                temp_8k                    # Output file
+                'sox', temp_24k,
+                '-r', '8000',              # 8kHz for AudioSocket
+                '-c', '1',                 # Mono
+                '-b', '16',                # 16-bit
+                '-e', 'signed-integer',    # PCM
+                temp_8k
             ]
 
-            logger.debug(f"Sox command: {' '.join(sox_cmd)}")
             result = subprocess.run(sox_cmd, capture_output=True, text=True, timeout=10)
+
+            # Cleanup temp 24k file immediately
+            try:
+                os.unlink(temp_24k)
+            except:
+                pass
 
             if result.returncode != 0:
                 logger.error(f"Sox resampling failed: {result.stderr}")
                 return b''
 
-            # Read resampled raw PCM
-            with open(temp_8k, 'rb') as f:
-                audio_8khz_bytes = f.read()
+            if not os.path.exists(temp_8k):
+                logger.error("Sox output file not created")
+                return b''
 
-            logger.info(f"TTS synthesis success: {len(audio_8khz_bytes)} bytes @ 8kHz")
+            # Read WAV file and extract raw PCM data
+            audio_8khz, sr = sf.read(temp_8k, dtype='int16')
+
+            # Convert numpy array to bytes
+            audio_8khz_bytes = audio_8khz.tobytes()
+
+            file_size = os.path.getsize(temp_8k)
+            logger.info(f"Kokoro TTS success: {file_size} bytes WAV, {len(audio_8khz_bytes)} bytes PCM")
+
             return audio_8khz_bytes
 
         except Exception as e:
