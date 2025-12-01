@@ -186,6 +186,47 @@ class VoskASR:
         self.current_utterance = ""
         logger.debug("ASR recognizer reset")
 
+    def transcribe_audio(self, audio_data: bytes, emit_final: bool = True) -> str:
+        """
+        Batch transcription of complete audio buffer.
+        Used for offline/batch processing of accumulated speech.
+
+        Args:
+            audio_data: Complete audio buffer (16-bit PCM @ self.sample_rate)
+            emit_final: Whether to emit final result and trigger callbacks
+
+        Returns:
+            Transcribed text string
+        """
+        try:
+            # Create a fresh recognizer for this transcription
+            recognizer = KaldiRecognizer(self.model, self.sample_rate)
+            recognizer.SetWords(True)
+
+            # Process entire audio buffer
+            recognizer.AcceptWaveform(audio_data)
+
+            # Get final result
+            final_result = json.loads(recognizer.FinalResult())
+            transcript = final_result.get("text", "").strip()
+
+            if transcript and emit_final:
+                logger.info(f"Batch transcription: '{transcript}'")
+                self.final_results.append(transcript)
+
+                # Call callback if registered
+                if self.on_final:
+                    try:
+                        self.on_final(transcript)
+                    except Exception as e:
+                        logger.error(f"Error in final callback: {e}")
+
+            return transcript
+
+        except Exception as e:
+            logger.error(f"Batch transcription error: {e}", exc_info=True)
+            return ""
+
     def get_recent_results(self, count: int = 5) -> list[str]:
         """
         Get recent final results.
