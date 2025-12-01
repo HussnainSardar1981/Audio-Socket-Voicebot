@@ -82,6 +82,24 @@ class LLMConfig:
     TIMEOUT = 30
 
 
+class ZabbixConfig:
+    """Zabbix alert integration configuration"""
+    # Alert server endpoint
+    ALERT_SERVER_URL = "http://localhost:9001"
+
+    # DTMF detection settings
+    DTMF_SAMPLE_RATE = 8000              # AudioSocket rate (don't change)
+    DTMF_FRAME_DURATION_MS = 20          # Frame duration (don't change)
+    DTMF_WAIT_TIMEOUT = 30               # Seconds to wait for DTMF response
+    DTMF_ENERGY_THRESHOLD = 100.0        # Minimum energy for tone detection
+    DTMF_TONE_THRESHOLD = 0.3            # Relative magnitude threshold
+    DTMF_MIN_DURATION_MS = 40            # Minimum tone duration (40ms = 2 frames)
+
+    # Alert call detection
+    # Alert calls are detected via dialplan passing call_id in UUID field
+    ALERT_CALL_ID_PREFIX = "zabbix_alert_"
+
+
 class ConversationState(str, Enum):
     """Conversation states (REUSED)"""
     IDLE = "IDLE"
