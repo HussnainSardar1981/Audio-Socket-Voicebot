@@ -77,6 +77,7 @@ class KokoroTTS:
         import uuid
         import time
         import os
+        import struct
 
         temp_24k = None
         temp_8k = None
@@ -100,35 +101,52 @@ class KokoroTTS:
             # Concatenate chunks
             full_audio = np.concatenate(audio_chunks)
 
-            # Save 24kHz audio to temp file
-            unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
-            temp_24k = f"/tmp/kokoro_24k_{unique_id}.wav"
-            temp_8k = f"/tmp/kokoro_8k_{unique_id}.wav"
+            # Convert float32 to int16 PCM
+            audio_24khz_int16 = (full_audio * 32767).astype(np.int16)
 
-            # Write 24kHz WAV file
-            sf.write(temp_24k, full_audio, 24000, subtype='PCM_16')
+            # Generate unique temp filenames
+            unique_id = f"{int(time.time())}_{uuid.uuid4().hex[:8]}"
+            temp_24k = f"/tmp/kokoro_24k_{unique_id}.raw"
+            temp_8k = f"/tmp/kokoro_8k_{unique_id}.raw"
+
+            # Write raw PCM file (bypass soundfile issues)
+            with open(temp_24k, 'wb') as f:
+                f.write(audio_24khz_int16.tobytes())
+
+            logger.debug(f"Wrote 24kHz raw PCM: {len(audio_24khz_int16)} samples")
 
             # Use sox for high-quality resampling (same as AGI)
+            # Input: raw 24kHz mono 16-bit signed
+            # Output: raw 8kHz mono 16-bit signed
             sox_cmd = [
-                'sox', temp_24k,
-                '-r', '8000',              # 8kHz sample rate
-                '-c', '1',                 # Mono
-                '-b', '16',                # 16-bit
-                '-e', 'signed-integer',    # PCM signed integer
-                temp_8k
+                'sox',
+                '-t', 'raw',               # Input type: raw PCM
+                '-r', '24000',             # Input sample rate: 24kHz
+                '-e', 'signed-integer',    # Input encoding
+                '-b', '16',                # Input bit depth
+                '-c', '1',                 # Input channels: mono
+                temp_24k,                  # Input file
+                '-t', 'raw',               # Output type: raw PCM
+                '-r', '8000',              # Output sample rate: 8kHz
+                '-e', 'signed-integer',    # Output encoding
+                '-b', '16',                # Output bit depth
+                '-c', '1',                 # Output channels: mono
+                temp_8k                    # Output file
             ]
 
+            logger.debug(f"Sox command: {' '.join(sox_cmd)}")
             result = subprocess.run(sox_cmd, capture_output=True, text=True, timeout=10)
 
             if result.returncode != 0:
                 logger.error(f"Sox resampling failed: {result.stderr}")
                 return b''
 
-            # Read resampled audio
-            audio_8khz, sr = sf.read(temp_8k, dtype='int16')
+            # Read resampled raw PCM
+            with open(temp_8k, 'rb') as f:
+                audio_8khz_bytes = f.read()
 
-            # Convert to bytes
-            return audio_8khz.tobytes()
+            logger.info(f"TTS synthesis success: {len(audio_8khz_bytes)} bytes @ 8kHz")
+            return audio_8khz_bytes
 
         except Exception as e:
             logger.error(f"Kokoro TTS error: {e}", exc_info=True)
