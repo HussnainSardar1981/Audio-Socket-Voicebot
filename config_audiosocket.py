@@ -5,6 +5,10 @@ from pathlib import Path
 from enum import Enum
 
 
+# Temp directory for audio files
+TEMP_DIR = Path("/home/aiadmin/netovo_voicebot/kokora/temp")
+
+
 class AudioSocketConfig:
     """AudioSocket TCP server configuration"""
     HOST = "127.0.0.1"  # Listen address
