@@ -31,7 +31,7 @@ import requests
 import json
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -331,13 +331,21 @@ class AudioSocketVoicebot:
                 # Accumulate speech
                 if self.state == ConversationState.USER_SPEAKING:
                     self.user_speech_buffer.extend(pcm_data)
+                    # Debug: Log buffer size every 50 frames
+                    if self.speech_frames % 50 == 0:
+                        logger.debug(f"Speech: {self.speech_frames} frames, buffer: {len(self.user_speech_buffer)} bytes")
 
             else:
                 self.silence_frames += 1
 
+                # Debug: Log silence detection
+                if self.state == ConversationState.USER_SPEAKING:
+                    if self.silence_frames % 10 == 0:
+                        logger.debug(f"Silence: {self.silence_frames} frames, buffer: {len(self.user_speech_buffer)} bytes")
+
                 # End of speech detection (500ms of silence = 25 frames @ 20ms)
                 if self.state == ConversationState.USER_SPEAKING and self.silence_frames >= 25:
-                    logger.info("User finished speaking (silence detected)")
+                    logger.info(f"User finished speaking (silence detected after {self.silence_frames} frames)")
                     asyncio.create_task(self._process_user_speech())
 
         except Exception as e:
