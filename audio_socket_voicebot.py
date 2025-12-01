@@ -190,22 +190,20 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
             AI response text
         """
         try:
-            # Add user message to history
-            self.conversation_history.append({
-                'role': 'user',
-                'content': user_text
-            })
+            # Build prompt with conversation context
+            context = "\n".join([
+                f"{msg['role']}: {msg['content']}"
+                for msg in self.conversation_history[-5:]  # Last 5 messages
+            ])
 
-            # Build prompt with history
-            messages = [{'role': 'system', 'content': self.system_prompt}]
-            messages.extend(self.conversation_history[-10:])  # Last 10 messages
+            prompt = f"{self.system_prompt}\n\n{context}\nuser: {user_text}\nassistant:"
 
-            # Call Ollama API
+            # Call Ollama /api/generate endpoint (matches AGI)
             response = requests.post(
-                f"{self.base_url}/api/chat",
+                f"{self.base_url}/api/generate",
                 json={
                     'model': self.model,
-                    'messages': messages,
+                    'prompt': prompt,
                     'stream': False
                 },
                 timeout=self.timeout
@@ -214,13 +212,11 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
 
             # Extract response
             result = response.json()
-            assistant_text = result['message']['content']
+            assistant_text = result['response'].strip()
 
             # Add to history
-            self.conversation_history.append({
-                'role': 'assistant',
-                'content': assistant_text
-            })
+            self.conversation_history.append({'role': 'user', 'content': user_text})
+            self.conversation_history.append({'role': 'assistant', 'content': assistant_text})
 
             logger.info(f"LLM response: {assistant_text}")
             return assistant_text
@@ -315,8 +311,19 @@ class AudioSocketVoicebot:
                         self.consecutive_speech_frames = 0
                 return  # Don't process audio during bot speaking
 
-            # VAD on 8kHz audio
-            is_speech = self.vad.process_frame(pcm_data)
+            # Pre-filter: reject low-energy frames (channel noise) before VAD
+            energy = self._calculate_energy(pcm_data)
+            if energy < TurnTakingConfig.VAD_ENERGY_THRESHOLD:
+                is_speech = False
+                # Log first few rejections for debugging
+                if not hasattr(self, '_noise_logged'):
+                    self._noise_logged = 0
+                if self._noise_logged < 5:
+                    logger.debug(f"Frame rejected: energy {energy:.1f} < threshold {TurnTakingConfig.VAD_ENERGY_THRESHOLD}")
+                    self._noise_logged += 1
+            else:
+                # Energy above threshold - run VAD
+                is_speech = self.vad.process_frame(pcm_data)
 
             if is_speech:
                 self.speech_frames += 1
