@@ -331,9 +331,15 @@ class AudioSocketVoicebot:
                 # Accumulate speech
                 if self.state == ConversationState.USER_SPEAKING:
                     self.user_speech_buffer.extend(pcm_data)
+
                     # Debug: Log buffer size every 50 frames
                     if self.speech_frames % 50 == 0:
                         logger.debug(f"Speech: {self.speech_frames} frames, buffer: {len(self.user_speech_buffer)} bytes")
+
+                    # Max speech duration: 10 seconds (500 frames @ 20ms)
+                    if self.speech_frames >= 500:
+                        logger.warning(f"Max speech duration reached ({self.speech_frames} frames), forcing transcription")
+                        asyncio.create_task(self._process_user_speech())
 
             else:
                 self.silence_frames += 1
