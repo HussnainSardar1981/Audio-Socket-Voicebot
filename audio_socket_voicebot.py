@@ -16,30 +16,17 @@ from vosk_asr import VoskASR
 from audio_utils import resample_8khz_to_16khz
 from kokoro_tts_audiosocket import KokoroTTSClient
 from ollama_audiosocket import OllamaClient
+from model_warmup import SharedModels, load_models
 from config_audiosocket import (
     AudioSocketConfig, AudioConfig, ConversationState,
     TurnTakingConfig, LLMConfig
 )
-
-# Imports for model loading
-import torch
-from kokoro import KPipeline
-import requests
 
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-
-# Global shared models (loaded once at startup, reused across all connections)
-class SharedModels:
-    """Shared model instances to avoid loading on every call"""
-    vosk_model = None
-    kokoro_pipeline = None
-    kokoro_device = None
-    models_loaded = False
 
 
 class AudioSocketVoicebot:
@@ -90,6 +77,7 @@ class AudioSocketVoicebot:
         # Interruption detection
         self.interruption_enabled = TurnTakingConfig.INTERRUPTION_ENABLED
         self.consecutive_speech_frames = 0
+        self.interruption_requested = False  # Flag to stop audio playback
 
         logger.info("AudioSocket Voicebot initialized")
 
@@ -164,9 +152,9 @@ class AudioSocketVoicebot:
                     if self.speech_frames % 50 == 0:
                         logger.debug(f"Speech: {self.speech_frames} frames, buffer: {len(self.user_speech_buffer)} bytes")
 
-                    # Max speech duration: 10 seconds (500 frames @ 20ms)
-                    if self.speech_frames >= 500:
-                        logger.warning(f"Max speech duration reached ({self.speech_frames} frames), forcing transcription")
+                    # Max speech duration timeout (from config)
+                    if self.speech_frames >= AudioConfig.MAX_SPEECH_FRAMES:
+                        logger.warning(f"Max speech duration reached ({self.speech_frames} frames = {AudioConfig.MAX_SPEECH_FRAMES * 20 / 1000:.1f}s), forcing transcription")
                         asyncio.create_task(self._process_user_speech())
 
             else:
@@ -177,9 +165,9 @@ class AudioSocketVoicebot:
                     if self.silence_frames % 10 == 0:
                         logger.debug(f"Silence: {self.silence_frames} frames, buffer: {len(self.user_speech_buffer)} bytes")
 
-                # End of speech detection (500ms of silence = 25 frames @ 20ms)
-                if self.state == ConversationState.USER_SPEAKING and self.silence_frames >= 25:
-                    logger.info(f"User finished speaking (silence detected after {self.silence_frames} frames)")
+                # End of speech detection (silence threshold from config)
+                if self.state == ConversationState.USER_SPEAKING and self.silence_frames >= AudioConfig.SILENCE_FRAMES_TO_END_SPEECH:
+                    logger.info(f"User finished speaking (silence detected after {self.silence_frames} frames = {self.silence_frames * 20}ms)")
                     asyncio.create_task(self._process_user_speech())
 
         except Exception as e:
@@ -192,10 +180,11 @@ class AudioSocketVoicebot:
 
     def _handle_interruption(self):
         """Handle user interruption during bot speech"""
-        # Stop current playback (would need enhancement to actually stop audio stream)
+        # Set flag to stop audio playback immediately
+        self.interruption_requested = True
         self.state = ConversationState.IDLE
         self.consecutive_speech_frames = 0
-        logger.info("Interruption handled - returning to IDLE")
+        logger.info("❌ INTERRUPTION - Stopping bot speech")
 
     async def _process_user_speech(self):
         """Process accumulated user speech"""
@@ -206,9 +195,11 @@ class AudioSocketVoicebot:
             speech_8khz = bytes(self.user_speech_buffer)
             self.user_speech_buffer.clear()
 
-            if len(speech_8khz) < 1600:  # Less than 100ms
-                logger.warning("Speech too short, ignoring")
+            # Check minimum speech length (from config)
+            if len(speech_8khz) < AudioConfig.MIN_SPEECH_BYTES:
+                logger.warning(f"Speech too short ({len(speech_8khz)} bytes < {AudioConfig.MIN_SPEECH_BYTES}), ignoring")
                 self.state = ConversationState.IDLE
+                self.speech_frames = 0
                 return
 
             # Resample 8kHz -> 16kHz for Vosk
@@ -256,6 +247,7 @@ class AudioSocketVoicebot:
         """
         try:
             self.state = ConversationState.AI_SPEAKING
+            self.interruption_requested = False  # Reset interruption flag
             logger.info(f"Bot speaking: {text}")
 
             # Synthesize with Kokoro (using af_heart voice with appropriate voice type)
@@ -272,7 +264,17 @@ class AudioSocketVoicebot:
 
             # Send audio in 320-byte frames (20ms @ 8kHz)
             frame_size = AudioSocketConfig.FRAME_SIZE
+            frames_sent = 0
+            total_frames = len(audio_pcm_8khz) // frame_size
+
             for i in range(0, len(audio_pcm_8khz), frame_size):
+                # Check for interruption BEFORE sending each frame
+                if self.interruption_requested:
+                    logger.info(f"🛑 Audio playback stopped by user interruption (sent {frames_sent}/{total_frames} frames)")
+                    self.state = ConversationState.IDLE
+                    self.speech_frames = 0  # Reset for next user input
+                    return
+
                 frame = audio_pcm_8khz[i:i + frame_size]
 
                 # Pad last frame if needed
@@ -281,6 +283,7 @@ class AudioSocketVoicebot:
 
                 # Send frame
                 await self.connection.send_audio(frame)
+                frames_sent += 1
 
                 # Throttle to real-time (20ms per frame)
                 await asyncio.sleep(0.020)
@@ -291,67 +294,6 @@ class AudioSocketVoicebot:
         except Exception as e:
             logger.error(f"Error speaking: {e}", exc_info=True)
             self.state = ConversationState.IDLE
-
-
-def load_models():
-    """Load all models once at startup (model warmup)"""
-    import time
-    from vosk import Model
-
-    logger.info("=" * 60)
-    logger.info("🔥 Loading models for AudioSocket Voicebot...")
-    logger.info("=" * 60)
-
-    total_start = time.time()
-
-    try:
-        # Load Vosk ASR model
-        logger.info(f"Loading Vosk model from {AudioConfig.VOSK_MODEL_PATH}...")
-        vosk_start = time.time()
-        SharedModels.vosk_model = Model(str(AudioConfig.VOSK_MODEL_PATH))
-        vosk_time = time.time() - vosk_start
-        logger.info(f"✅ Vosk model loaded in {vosk_time:.1f}s")
-
-        # Load Kokoro TTS pipeline
-        logger.info("Loading Kokoro TTS pipeline...")
-        kokoro_start = time.time()
-        SharedModels.kokoro_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-        if torch.cuda.is_available():
-            SharedModels.kokoro_pipeline = KPipeline(lang_code='a', device=SharedModels.kokoro_device)
-            gpu_name = torch.cuda.get_device_name(0)
-            gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-            logger.info(f"GPU: {gpu_name} ({gpu_memory:.1f}GB)")
-        else:
-            SharedModels.kokoro_pipeline = KPipeline(lang_code='a')
-
-        kokoro_time = time.time() - kokoro_start
-        logger.info(f"✅ Kokoro TTS loaded in {kokoro_time:.1f}s")
-
-        # Warmup Ollama
-        logger.info(f"Warming up Ollama ({LLMConfig.MODEL_NAME})...")
-        ollama_start = time.time()
-        response = requests.post(
-            f"{LLMConfig.BASE_URL}/api/generate",
-            json={'model': LLMConfig.MODEL_NAME, 'prompt': 'Hello', 'stream': False},
-            timeout=30
-        )
-        response.raise_for_status()
-        ollama_time = time.time() - ollama_start
-        logger.info(f"✅ Ollama warmed up in {ollama_time:.1f}s")
-
-        SharedModels.models_loaded = True
-        total_time = time.time() - total_start
-
-        logger.info("=" * 60)
-        logger.info(f"✅ All models loaded in {total_time:.1f}s")
-        logger.info("🚀 AudioSocket Voicebot ready for INSTANT responses!")
-        logger.info("=" * 60)
-
-    except Exception as e:
-        logger.error(f"❌ Model loading failed: {e}", exc_info=True)
-        logger.error("Server cannot start without models")
-        raise
 
 
 async def main():
