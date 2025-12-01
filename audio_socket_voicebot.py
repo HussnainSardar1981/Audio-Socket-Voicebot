@@ -23,7 +23,8 @@ from config_audiosocket import (
 
 # Kokoro TTS imports
 import torch
-from kokoro import generate
+from kokoro import KPipeline
+import soundfile as sf
 
 # Ollama imports
 import requests
@@ -43,31 +44,58 @@ class KokoroTTS:
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         logger.info(f"Kokoro TTS using device: {self.device}")
 
+        # Initialize Kokoro pipeline
+        if torch.cuda.is_available():
+            self.pipeline = KPipeline(lang_code='a', device=self.device)
+        else:
+            self.pipeline = KPipeline(lang_code='a')
+
+        # Voice mapping from AGI version
+        self.voice_mapping = {
+            "af_sarah": "af_sarah",
+            "af_bella": "af_bella",
+            "af_jessica": "af_jessica",
+            "af_nova": "af_nova",
+            "af_sky": "af_sky",
+            "af_heart": "af_heart",
+            "af_alloy": "af_alloy"
+        }
+
     def synthesize(self, text: str, voice: str = 'af_sky') -> bytes:
         """
         Synthesize speech from text.
 
         Args:
             text: Text to synthesize
-            voice: Voice name (af_sky, af_bella, am_adam, am_michael, etc.)
+            voice: Voice name (af_sky, af_bella, af_heart, etc.)
 
         Returns:
             PCM audio data at 8kHz (int16 LE)
         """
         try:
-            # Generate audio with Kokoro (produces 24kHz samples)
-            audio_24khz, sample_rate = generate(
-                text,
-                voice=voice,
-                speed=1.0,
-                lang='en-us'
-            )
+            # Map voice
+            kokoro_voice = self.voice_mapping.get(voice, "af_heart")
 
-            # Convert to int16 PCM
-            audio_24khz_int16 = (audio_24khz * 32767).astype(np.int16)
+            # Generate audio using KPipeline (yields chunks)
+            generator = self.pipeline(text, voice=kokoro_voice)
 
-            # Resample 24kHz -> 8kHz for AudioSocket
-            audio_8khz = self._resample_24k_to_8k(audio_24khz_int16)
+            # Collect audio chunks
+            audio_chunks = []
+            for i, (gs, ps, audio_chunk) in enumerate(generator):
+                audio_chunks.append(audio_chunk)
+
+            if not audio_chunks:
+                logger.error("No audio generated from Kokoro")
+                return b''
+
+            # Concatenate chunks
+            full_audio = np.concatenate(audio_chunks)
+
+            # Kokoro outputs 24kHz float32, convert to int16
+            audio_24khz_int16 = (full_audio * 32767).astype(np.int16)
+
+            # Resample 24kHz -> 8kHz for AudioSocket (3:1 decimation)
+            audio_8khz = audio_24khz_int16[::3]
 
             # Convert to bytes
             return audio_8khz.tobytes()
@@ -75,11 +103,6 @@ class KokoroTTS:
         except Exception as e:
             logger.error(f"Kokoro TTS error: {e}", exc_info=True)
             return b''
-
-    def _resample_24k_to_8k(self, audio_24khz: np.ndarray) -> np.ndarray:
-        """Resample 24kHz to 8kHz (3:1 decimation)"""
-        # Simple decimation (take every 3rd sample)
-        return audio_24khz[::3]
 
 
 class OllamaLLM:
