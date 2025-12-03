@@ -73,9 +73,10 @@ class MicrosoftGraphDownloader:
 
             token_data = response.json()
             self.access_token = token_data['access_token']
-            self.token_expiry = datetime.now().timestamp() + token_data['expires_in']
+            expires_in = int(token_data['expires_in'])
+            self.token_expiry = datetime.now().timestamp() + expires_in
 
-            print(f"[OK] Access token obtained (expires in {token_data['expires_in']} seconds)")
+            print(f"[OK] Access token obtained (expires in {expires_in} seconds)")
             return self.access_token
 
         except requests.exceptions.RequestException as e:
