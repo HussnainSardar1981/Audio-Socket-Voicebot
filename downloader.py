@@ -98,10 +98,11 @@ class MicrosoftGraphDownloader:
         print(f"[API] Fetching site ID for {self.sharepoint_site_url}...")
 
         # Extract hostname from URL
-        # Example: https://netovo.sharepoint.com → netovo.sharepoint.com
+        # Example: https://mad4it.sharepoint.com → mad4it.sharepoint.com
         hostname = self.sharepoint_site_url.replace("https://", "").replace("http://", "")
 
-        url = f"{self.graph_endpoint}/sites/{hostname}:/sites/root"
+        # The site name is sophia_do_not_reply
+        url = f"{self.graph_endpoint}/sites/{hostname}:/sites/sophia_do_not_reply"
 
         try:
             response = requests.get(url, headers=self.get_headers(), timeout=10)
@@ -426,13 +427,15 @@ def main():
         print("[WARN] .env file will not be loaded automatically")
         print("[INFO] Set environment variables manually:")
         print("  GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET, GRAPH_TENANT_ID")
-        print("  SHAREPOINT_SITE_URL")
+        print("  SHAREPOINT_SITE_URL, SHAREPOINT_KB_PATH, SHAREPOINT_SUBFOLDER")
 
     # Get credentials from environment
     client_id = os.getenv('GRAPH_CLIENT_ID')
     client_secret = os.getenv('GRAPH_CLIENT_SECRET')
     tenant_id = os.getenv('GRAPH_TENANT_ID')
-    sharepoint_site_url = os.getenv('SHAREPOINT_SITE_URL', 'https://netovo.sharepoint.com')
+    sharepoint_site_url = os.getenv('SHAREPOINT_SITE_URL', 'https://mad4it.sharepoint.com')
+    kb_path = os.getenv('SHAREPOINT_KB_PATH', '/General/Knowledgebase/Shared with Customer')
+    subfolder = os.getenv('SHAREPOINT_SUBFOLDER', 'How - To')
     server_root = os.getenv('SERVER_ROOT', '/home/aiadmin/netovo_voicebot/audiosockets')
 
     # Validate credentials
@@ -447,7 +450,9 @@ def main():
         client_id=client_id,
         client_secret=client_secret,
         tenant_id=tenant_id,
-        sharepoint_site_url=sharepoint_site_url
+        sharepoint_site_url=sharepoint_site_url,
+        kb_path=kb_path,
+        subfolder=subfolder
     )
 
     # Download PDFs for all customers
