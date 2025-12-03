@@ -73,7 +73,7 @@ class KBDocumentExtractor:
                 img_cv = cv2.imread(str(img_path))
                 if img_cv is not None:
                     try:
-                        ocr_result = self.ocr.ocr(img_cv, cls=True)
+                        ocr_result = self.ocr.ocr(img_cv)
 
                         ocr_text = ""
                         scores = []
