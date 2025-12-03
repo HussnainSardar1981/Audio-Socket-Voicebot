@@ -30,7 +30,6 @@ Usage:
 import json
 import sys
 import logging
-import os
 import re
 from pathlib import Path
 from datetime import datetime
@@ -38,13 +37,6 @@ from typing import Dict, List, Optional
 import requests
 import time
 import argparse
-
-try:
-    from dotenv import load_dotenv
-    DOTENV_AVAILABLE = True
-except ImportError:
-    DOTENV_AVAILABLE = False
-    print("[WARN] python-dotenv not installed")
 
 logger = None
 
@@ -105,7 +97,7 @@ def rigorous_pre_cleanup(text: str) -> str:
 class TextCleaner:
     """Clean extracted PDF text using LLM for semantic fixing"""
 
-    def __init__(self, ollama_url: str = "http://localhost:11434", model: str = "nous-hermes2"):
+    def __init__(self, ollama_url: str = "http://localhost:11434", model: str = "llama3.1"):
         global logger
 
         self.ollama_url = ollama_url
@@ -463,9 +455,6 @@ Examples:
     parser.add_argument('--all', action='store_true', help='Clean all customers')
 
     args = parser.parse_args()
-
-    if DOTENV_AVAILABLE:
-        load_dotenv()
 
     server_root = Path(args.server_root)
 
