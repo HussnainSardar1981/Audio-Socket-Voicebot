@@ -198,6 +198,19 @@ class TextCleaner:
 
         return text
 
+    def is_boilerplate_ocr(self, ocr_text: str) -> bool:
+        """Check if OCR text is only boilerplate content"""
+        boilerplate_ocr_patterns = [
+            r'MADISON\s+TECHNOLO[GC].*?Managed Hosting.*?Services',
+            r'Powered by FileCloud',
+        ]
+
+        for pattern in boilerplate_ocr_patterns:
+            if re.search(pattern, ocr_text, flags=re.IGNORECASE | re.DOTALL):
+                return True
+
+        return False
+
     def clean_extraction_result(self, extraction_json: Dict) -> Dict:
         """
         Clean all text in an extraction result
@@ -227,21 +240,44 @@ class TextCleaner:
             else:
                 cleaned_page['pdf_text'] = ""
 
-            # Clean OCR text from images (but keep separate - don't synthesize)
+            # Clean OCR text from images (with filtering)
             cleaned_images = []
+            removed_images = 0
+
             for img_data in page_data.get('images', []):
+                ocr_text = img_data.get('ocr_text', '').strip()
+                ocr_confidence = img_data.get('ocr_confidence', 1.0)
+
+                # FILTER 1: Skip images with boilerplate-only OCR
+                if self.is_boilerplate_ocr(ocr_text):
+                    logger.debug(f"Skipping image: OCR is boilerplate only")
+                    removed_images += 1
+                    continue
+
+                # FILTER 2: Skip images with very low confidence
+                if ocr_confidence < 0.5:
+                    logger.debug(f"Skipping image: OCR confidence too low ({ocr_confidence})")
+                    removed_images += 1
+                    continue
+
+                # FILTER 3: Skip images with no OCR text
+                if not ocr_text:
+                    logger.debug(f"Skipping image: No OCR text")
+                    removed_images += 1
+                    continue
+
+                # Image passed filters - clean it
                 cleaned_img = img_data.copy()
 
-                if img_data.get('ocr_text', '').strip():
-                    ocr_text = img_data['ocr_text']
-                    logger.debug(f"Cleaning image OCR ({len(ocr_text)} chars)")
-                    cleaned_ocr_text = self.clean_text_with_llm(ocr_text)
-                    logger.debug(f"Cleaned to {len(cleaned_ocr_text)} chars")
-                    cleaned_img['ocr_text'] = cleaned_ocr_text
-                else:
-                    cleaned_img['ocr_text'] = ""
+                logger.debug(f"Cleaning image OCR ({len(ocr_text)} chars, confidence: {ocr_confidence})")
+                cleaned_ocr_text = self.clean_text_with_llm(ocr_text)
+                logger.debug(f"Cleaned to {len(cleaned_ocr_text)} chars")
+                cleaned_img['ocr_text'] = cleaned_ocr_text
 
                 cleaned_images.append(cleaned_img)
+
+            if removed_images > 0:
+                logger.debug(f"Page {page_data['page_num']}: Removed {removed_images} images")
 
             cleaned_page['images'] = cleaned_images
             cleaned_pages.append(cleaned_page)
@@ -249,7 +285,9 @@ class TextCleaner:
         cleaned_result['pages'] = cleaned_pages
         cleaned_result['metadata']['cleaned_at'] = datetime.now().isoformat()
         cleaned_result['metadata']['cleaning_notes'] = (
-            "Two-stage cleaning: 1) Boilerplate removal, 2) LLM semantic fixing. "
+            "Three-filter cleaning: 1) Remove boilerplate-only OCR images (Madison headers, FileCloud footers), "
+            "2) Remove low-confidence OCR (< 0.5), 3) LLM semantic fixing (OCR errors, hyphenation). "
+            "Numbered steps and newlines preserved for procedural structure. "
             "OCR text kept separate from PDF text to preserve visual context distinction."
         )
 
