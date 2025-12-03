@@ -50,7 +50,7 @@ class MicrosoftGraphDownloader:
         self.subfolder = subfolder
 
         # MS Graph endpoints
-        self.token_endpoint = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+        self.token_endpoint = f"https://login.microsoftonline.com/{tenant_id}/oauth2/token"
         self.graph_endpoint = "https://graph.microsoft.com/v1.0"
 
         self.access_token = None
