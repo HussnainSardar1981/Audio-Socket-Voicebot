@@ -94,19 +94,12 @@ class KBDocumentExtractor:
                         else:
                             avg_confidence = 0.0
 
-                        if ocr_text.strip() and avg_confidence > 0.3:
-                            images_data.append({
-                                'filename': img_path.name,
-                                'ocr_text': ocr_text,
-                                'confidence': float(avg_confidence)
-                            })
-                        elif ocr_text.strip():
-                            # Even if low confidence, still save text
-                            images_data.append({
-                                'filename': img_path.name,
-                                'ocr_text': ocr_text,
-                                'confidence': float(avg_confidence)
-                            })
+                        # Always save image metadata, whether OCR found text or not
+                        images_data.append({
+                            'filename': img_path.name,
+                            'ocr_text': ocr_text,
+                            'confidence': float(avg_confidence)
+                        })
                     except Exception as ocr_err:
                         logger.warning(f"OCR processing failed for {img_path.name}: {ocr_err}")
                         images_data.append({
