@@ -58,10 +58,12 @@ def rigorous_pre_cleanup(text: str) -> str:
         r'MADISON\s+TECHNOLO[GC].*?Managed Hosting.*?Services',
         # MTI Support Help Desk contact info (completely ignore)
         r'MTI\s+Support\s+Help\s+Desk\s+T:\s*\+1\s*\(\s*212\s*\)\s*400-7550.*?www\.madisonti\.com',
-        # Document prep line (completely ignore)
-        r'Prepared\s+By\s+Madison\s+Technology\s+for\s+DeLorenzo',
+        # Document prep line - flexible to match ANY customer name (completely ignore)
+        r'Prepared\s+by\s+Madison\s+Technology\s+for\s+\w+',
+        # Alternative format: "Prepared By Madison Technology for {anything}"
+        r'Prepared\s+By\s+Madison\s+Technology\s+for\s+.+',
         # Madison Technology How-To header (completely ignore)
-        r'Madison\s+Technology\s*\n\s*DeLorenzo\s+How\s+To\s+Use.*?Rev\s+1a',
+        r'Madison\s+Technology\s*\n\s*.*?How\s+To\s+Use.*?Rev\s+1a',
         # Page numbers (remove)
         r'Page\s+\d+\s+of\s+\d+',
         # Confidential notice (remove)
@@ -143,15 +145,16 @@ class TextCleaner:
         prompt = (
             "You are a text reconstruction specialist. Fix ONLY actual errors, make ZERO other changes.\n\n"
             "STRICT RULES (follow exactly):\n"
-            "1. Fix broken hyphenated words ONLY: 'informa-\\ntion' becomes 'information'\n"
-            "2. Fix ONLY clear OCR character substitutions: '1l' to 'll', 'rn' to 'm', 'O' to '0' if numbers expected\n"
-            "3. Fix ONLY broken sentences from line breaks (rejoin split words)\n"
-            "4. PRESERVE ALL OTHER TEXT EXACTLY AS-IS\n"
-            "5. NEVER remove any words or content\n"
-            "6. NEVER add explanations or comments\n"
-            "7. Output ONLY the corrected text, nothing else\n\n"
+            "1. REMOVE lines starting with 'Prepared by Madison Technology for' (boilerplate document prep line)\n"
+            "2. Fix broken hyphenated words ONLY: 'informa-\\ntion' becomes 'information'\n"
+            "3. Fix ONLY clear OCR character substitutions: '1l' to 'll', 'rn' to 'm', 'O' to '0' if numbers expected\n"
+            "4. Fix ONLY broken sentences from line breaks (rejoin split words)\n"
+            "5. PRESERVE ALL OTHER TEXT EXACTLY AS-IS\n"
+            "6. NEVER remove any other words or content besides rule 1\n"
+            "7. NEVER add explanations or comments\n"
+            "8. Output ONLY the corrected text, nothing else\n\n"
             f"TEXT:\n{text}\n\n"
-            "CORRECTED TEXT (with ONLY the minimal fixes above):"
+            "CORRECTED TEXT (with ONLY the fixes above):"
         )
 
         for attempt in range(max_retries):
