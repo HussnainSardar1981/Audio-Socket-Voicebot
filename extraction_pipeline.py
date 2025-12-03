@@ -72,12 +72,27 @@ class KBDocumentExtractor:
                 # Run OCR on color image
                 img_cv = cv2.imread(str(img_path))
                 if img_cv is not None:
-                    ocr_result = self.ocr.ocr(img_cv)
-                    if ocr_result and ocr_result[0]:
-                        texts = [line[1][0] for line in ocr_result[0]]
-                        scores = [line[1][1] for line in ocr_result[0]]
-                        ocr_text = " ".join(texts)
-                        avg_confidence = sum(scores) / len(scores) if scores else 0
+                    try:
+                        ocr_result = self.ocr.ocr(img_cv, cls=True)
+
+                        ocr_text = ""
+                        scores = []
+
+                        if ocr_result and ocr_result[0]:
+                            # ocr_result[0] is a list of detections
+                            # Each detection: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]], (text, confidence)
+                            texts = []
+                            for detection in ocr_result[0]:
+                                if len(detection) >= 2:
+                                    text_conf = detection[1]  # (text, confidence)
+                                    if isinstance(text_conf, tuple) and len(text_conf) >= 2:
+                                        texts.append(text_conf[0])
+                                        scores.append(text_conf[1])
+
+                            ocr_text = " ".join(texts) if texts else ""
+                            avg_confidence = sum(scores) / len(scores) if scores else 0.0
+                        else:
+                            avg_confidence = 0.0
 
                         if ocr_text.strip() and avg_confidence > 0.3:
                             images_data.append({
@@ -85,7 +100,15 @@ class KBDocumentExtractor:
                                 'ocr_text': ocr_text,
                                 'confidence': float(avg_confidence)
                             })
-                    else:
+                        elif ocr_text.strip():
+                            # Even if low confidence, still save text
+                            images_data.append({
+                                'filename': img_path.name,
+                                'ocr_text': ocr_text,
+                                'confidence': float(avg_confidence)
+                            })
+                    except Exception as ocr_err:
+                        logger.warning(f"OCR processing failed for {img_path.name}: {ocr_err}")
                         images_data.append({
                             'filename': img_path.name,
                             'ocr_text': '',
