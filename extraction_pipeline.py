@@ -42,8 +42,14 @@ class KBDocumentExtractor:
         # Subdirectories
         (self.output_dir / "images").mkdir(exist_ok=True)
 
-        # Initialize OCR
-        self.ocr = PaddleOCR(lang='en')
+        # Initialize OCR with GPU support
+        import torch
+        use_gpu = torch.cuda.is_available()
+        if use_gpu:
+            logger.info("GPU detected - using CUDA for OCR acceleration")
+        else:
+            logger.warning("No GPU detected - OCR will run on CPU (slower)")
+        self.ocr = PaddleOCR(lang='en', use_gpu=use_gpu)
 
     def extract_page(self, page_num):
         """Extract text and images from a single page"""
