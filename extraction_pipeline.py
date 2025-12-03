@@ -23,16 +23,8 @@ import fitz
 import cv2
 from paddleocr import PaddleOCR
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - EXTRACTION - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/extraction.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# Configure logging - logs directory will be created in __init__
+logger = None  # Will be initialized after we create logs directory
 
 
 class KBDocumentExtractor:
@@ -149,10 +141,25 @@ class ExtractionPipeline:
     """Manage extraction for all customers"""
 
     def __init__(self, server_root: Path):
+        global logger
+
         self.server_root = Path(server_root)
 
-        # Create logs directory
-        (self.server_root / "logs").mkdir(parents=True, exist_ok=True)
+        # Create logs directory FIRST
+        logs_dir = self.server_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        # NOW configure logging
+        if logger is None:
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - EXTRACTION - %(levelname)s - %(message)s',
+                handlers=[
+                    logging.FileHandler(str(logs_dir / 'extraction.log'), encoding='utf-8'),
+                    logging.StreamHandler()
+                ]
+            )
+            logger = logging.getLogger(__name__)
 
         logger.info(f"Extraction pipeline initialized with root: {self.server_root}")
 
