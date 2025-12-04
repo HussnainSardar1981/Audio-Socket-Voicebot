@@ -99,7 +99,7 @@ def rigorous_pre_cleanup(text: str) -> str:
 class TextCleaner:
     """Clean extracted PDF text using LLM for semantic fixing"""
 
-    def __init__(self, ollama_url: str = "http://localhost:11434", model: str = "llama3.1"):
+    def __init__(self, ollama_url: str = "http://localhost:11434", model: str = "llama3.1:8b"):
         global logger
 
         self.ollama_url = ollama_url
