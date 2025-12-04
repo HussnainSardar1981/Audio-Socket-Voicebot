@@ -1,600 +1,538 @@
 """
-Token-Aware Text Chunking for RAG Pipeline
-Splits cleaned text into 400-600 token chunks with 20-30% overlap
-Generates SHA256 hashes for deduplication
+Production Text Cleaning Script for Server Deployment
+Two-stage cleaning pipeline:
+  Stage 1: Rigorous programmatic cleanup (boilerplate/whitespace removal)
+  Stage 2: LLM semantic fixing (OCR errors, hyphenation)
+
+IMPORTANT NOTE ON IMAGE OCR:
+The OCR text from screenshots (UI interfaces) is kept SEPARATE from PDF text.
+They are NOT synthesized/merged because:
+  1. Screenshots show UI elements, form fields, button labels
+  2. PDF text shows procedural instructions and documentation
+  3. Keeping them separate allows context-aware RAG retrieval
+  4. Users can search for both "what to do" AND "what it looks like"
+  5. Synthesizing would lose the distinction between action and visual context
+
+Usage:
+  # Clean single document
+  python clean_documents_server.py --file /path/to/extraction.json --customer CUSTOMER_ID
+
+  # Clean all documents for one customer
+  python clean_documents_server.py --customer CUSTOMER_ID
+
+  # Clean all documents for all customers
+  python clean_documents_server.py --all
+
+  # Clean specific customers
+  python clean_documents_server.py --customers CUST1 CUST2 CUST3
 """
 
 import json
-import hashlib
 import sys
 import logging
+import re
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
-import os
+from typing import Dict, List, Optional
+import requests
+import time
+import argparse
 
-# Try to import tokenizers for token counting
-try:
-    import tiktoken
-    TIKTOKEN_AVAILABLE = True
-except ImportError:
-    TIKTOKEN_AVAILABLE = False
-    print("[WARN] tiktoken not installed. Using character-based estimation.")
-    print("       For accurate token counting: pip install tiktoken")
-
-try:
-    from dotenv import load_dotenv
-    DOTENV_AVAILABLE = True
-except ImportError:
-    DOTENV_AVAILABLE = False
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - CHUNKER - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logger = None
 
 
-class TokenCounter:
-    """Count tokens using tiktoken or character estimation"""
+def rigorous_pre_cleanup(text: str) -> str:
+    """
+    Stage 1: Rigorous programmatic cleanup before LLM processing
+    Removes boilerplate, excessive whitespace, and structural noise
+    This ensures the LLM focuses on semantic fixes, not garbage removal
+    """
+    if not text or not text.strip():
+        return ""
 
-    def __init__(self, model: str = "gpt-3.5-turbo"):
-        """Initialize token counter"""
-        self.use_tiktoken = TIKTOKEN_AVAILABLE
-        if self.use_tiktoken:
-            try:
-                self.encoding = tiktoken.encoding_for_model(model)
-            except KeyError:
-                # Fallback to cl100k_base encoding
-                self.encoding = tiktoken.get_encoding("cl100k_base")
-        else:
-            # Character-based estimation: ~4 chars per token
-            self.chars_per_token = 4
+    # Common boilerplate patterns found in PDFs (manually identified - NOT LLM dependent)
+    # IMPORTANT: These patterns are carefully crafted to NOT remove solution content
+    # especially numbered steps (1., 2., 3., etc.) that are part of instructions
+    boilerplate_patterns = [
+        # Madison IT company header/footer (completely ignore this)
+        r'MADISON\s+TECHNOLO[GC].*?Managed Hosting.*?Services',
+        # MTI Support Help Desk contact info (completely ignore)
+        r'MTI\s+Support\s+Help\s+Desk\s+T:\s*\+1\s*\(\s*212\s*\)\s*400-7550.*?www\.madisonti\.com',
+        # Document prep line - flexible to match ANY customer name (completely ignore)
+        r'Prepared\s+by\s+Madison\s+Technology\s+for\s+\w+',
+        # Alternative format: "Prepared By Madison Technology for {anything}"
+        r'Prepared\s+By\s+Madison\s+Technology\s+for\s+.+',
+        # Madison Technology How-To header (completely ignore)
+        r'Madison\s+Technology\s*\n\s*.*?How\s+To\s+Use.*?Rev\s+1a',
+        # Page numbers (remove)
+        r'Page\s+\d+\s+of\s+\d+',
+        # Confidential notice (remove)
+        r'Confidential',
+        # Copyright (remove)
+        r'Copyright.*?\d{4}',
+        # Footer with copyright (remove)
+        r'Footer.*?©.*?\d{4}',
+    ]
 
-    def count(self, text: str) -> int:
-        """Count tokens in text"""
-        if self.use_tiktoken:
-            return len(self.encoding.encode(text))
-        else:
-            # Rough estimation: ~4 characters = 1 token
-            return len(text) // self.chars_per_token
+    # Remove boilerplate patterns
+    for pattern in boilerplate_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # Normalize excessive whitespace and indentation
+    # Replace 2+ spaces/tabs with single space
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+
+    # Clean up multiple consecutive newlines (keep max 2 for paragraphs)
+    text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+
+    # Remove leading/trailing whitespace from each line
+    lines = text.split('\n')
+    lines = [line.strip() for line in lines]
+    text = '\n'.join(lines)
+
+    # Remove empty lines at start/end
+    text = text.strip()
+
+    return text
 
 
-class DocumentChunker:
-    """Split documents into token-aware chunks with overlap"""
+class TextCleaner:
+    """Clean extracted PDF text using LLM for semantic fixing"""
 
-    def __init__(
-        self,
-        chunk_size: int = 600,
-        chunk_overlap: int = 150,
-        model: str = "gpt-3.5-turbo"
-    ):
-        """
-        Initialize chunker
+    def __init__(self, ollama_url: str = "http://localhost:11434", model: str = "llama3.1"):
+        global logger
 
-        Args:
-            chunk_size: Target tokens per chunk (400-600 recommended)
-            chunk_overlap: Overlap in tokens (20-30% of chunk_size)
-            model: Model for token counting
-        """
-        self.chunk_size = chunk_size
-        self.chunk_overlap = chunk_overlap
-        self.token_counter = TokenCounter(model)
+        self.ollama_url = ollama_url
+        self.model = model
+        self.timeout = 300
 
-        # Validate parameters
-        overlap_percent = (chunk_overlap / chunk_size) * 100
-        if overlap_percent < 15 or overlap_percent > 35:
-            print(f"[WARN] Overlap is {overlap_percent:.1f}% (recommended 20-30%)")
+        # Initialize logger if not already done
+        if logger is None:
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - CLEANING - %(levelname)s - %(message)s'
+            )
+            logger = logging.getLogger(__name__)
 
-    def chunk_text(self, text: str) -> List[str]:
-        """
-        Split text into chunks with overlap
-
-        Returns:
-            List of text chunks
-        """
-        if not text or len(text.strip()) < 50:
-            return [text] if text.strip() else []
-
-        # Split by paragraphs first
-        paragraphs = text.split('\n\n')
-        chunks = []
-        current_chunk = []
-        current_tokens = 0
-
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-
-            para_tokens = self.token_counter.count(para)
-
-            # If paragraph alone exceeds chunk size, split further
-            if para_tokens > self.chunk_size:
-                # Save current chunk
-                if current_chunk:
-                    chunks.append('\n\n'.join(current_chunk))
-                    current_chunk = []
-                    current_tokens = 0
-
-                # Split paragraph by sentences
-                sentences = para.split('. ')
-                for sentence in sentences:
-                    if not sentence:
-                        continue
-
-                    sent_tokens = self.token_counter.count(sentence + '. ')
-
-                    if sent_tokens > self.chunk_size:
-                        # Word-level split as last resort
-                        words = sentence.split(' ')
-                        sub_chunk = []
-                        sub_tokens = 0
-
-                        for word in words:
-                            word_tokens = self.token_counter.count(word + ' ')
-                            if sub_tokens + word_tokens > self.chunk_size and sub_chunk:
-                                chunks.append(' '.join(sub_chunk))
-                                sub_chunk = [word]
-                                sub_tokens = word_tokens
-                            else:
-                                sub_chunk.append(word)
-                                sub_tokens += word_tokens
-
-                        if sub_chunk:
-                            chunks.append(' '.join(sub_chunk))
-
-                    elif current_tokens + sent_tokens <= self.chunk_size:
-                        current_chunk.append(sentence + '. ')
-                        current_tokens += sent_tokens
-                    else:
-                        if current_chunk:
-                            chunks.append(''.join(current_chunk))
-                        current_chunk = [sentence + '. ']
-                        current_tokens = sent_tokens
-
-            elif current_tokens + para_tokens <= self.chunk_size:
-                current_chunk.append(para)
-                current_tokens += para_tokens
-
+        try:
+            response = requests.get(f"{self.ollama_url}/api/tags", timeout=5)
+            if response.status_code == 200:
+                logger.info(f"Connected to Ollama at {self.ollama_url}")
+                available_models = [m.get('name', '').split(':')[0] for m in response.json().get('models', [])]
+                logger.info(f"Available models: {available_models}")
             else:
-                if current_chunk:
-                    chunks.append('\n\n'.join(current_chunk))
-                current_chunk = [para]
-                current_tokens = para_tokens
+                logger.warning(f"Ollama connection status: {response.status_code}")
+        except Exception as e:
+            logger.warning(f"Could not verify Ollama connection: {e}")
 
-        # Add final chunk
-        if current_chunk:
-            chunks.append('\n\n'.join(current_chunk))
-
-        # Apply overlap: each chunk includes last N tokens of previous
-        if len(chunks) > 1 and self.chunk_overlap > 0:
-            chunks_with_overlap = []
-
-            for i, chunk in enumerate(chunks):
-                if i == 0:
-                    chunks_with_overlap.append(chunk)
-                else:
-                    # Get overlap from previous chunk
-                    prev_chunk = chunks[i - 1]
-                    prev_tokens = self.token_counter.count(prev_chunk)
-
-                    # Calculate how much to take from previous
-                    overlap_chars = int((self.chunk_overlap / prev_tokens) * len(prev_chunk)) if prev_tokens > 0 else 0
-                    overlap_text = prev_chunk[-overlap_chars:] if overlap_chars > 0 else ""
-
-                    # Combine with current
-                    combined = overlap_text + chunk
-                    chunks_with_overlap.append(combined)
-
-            return chunks_with_overlap
-
-        return chunks
-
-    def chunk_document(
-        self,
-        customer_id: str,
-        doc_name: str,
-        pages: List[Dict],
-        existing_hashes: Optional[set] = None
-    ) -> List[Dict]:
+    def clean_text_with_llm(self, text: str, max_retries: int = 3) -> str:
         """
-        Chunk a complete document (all pages)
-
-        Args:
-            customer_id: Customer identifier
-            doc_name: Document name
-            pages: List of page dicts with 'page_num' and 'pdf_text' keys
-            existing_hashes: Set of existing chunk hashes (for deduplication)
-
-        Returns:
-            List of chunk dicts with metadata
+        Use LLM to clean extracted text
+        Two-stage process:
+        1. Rigorous programmatic cleanup (boilerplate, whitespace)
+        2. LLM semantic fixing (OCR errors, hyphenation)
         """
-        if existing_hashes is None:
-            existing_hashes = set()
+        if not text.strip():
+            return ""
 
-        chunks = []
-        chunk_id = 0
+        # Stage 1: Rigorous pre-cleanup (removes structural noise)
+        text = rigorous_pre_cleanup(text)
 
-        for page in pages:
-            page_num = page.get('page_num', 0)
-            text_clean = page.get('pdf_text', '')
-            images = page.get('images', [])
+        if not text.strip():
+            return ""
 
-            if not text_clean.strip():
-                logger.debug(f"Skipping empty page {page_num}")
-                continue
+        # Stage 2: LLM-based semantic cleaning
+        prompt = (
+            "You are a text reconstruction specialist. Fix ONLY actual errors, make ZERO other changes.\n\n"
+            "STRICT RULES (follow exactly):\n"
+            "1. REMOVE lines starting with 'Prepared by Madison Technology for' (boilerplate document prep line)\n"
+            "2. Fix broken hyphenated words ONLY: 'informa-\\ntion' becomes 'information'\n"
+            "3. Fix ONLY clear OCR character substitutions: '1l' to 'll', 'rn' to 'm', 'O' to '0' if numbers expected\n"
+            "4. Fix ONLY broken sentences from line breaks (rejoin split words)\n"
+            "5. PRESERVE ALL OTHER TEXT EXACTLY AS-IS\n"
+            "6. NEVER remove any other words or content besides rule 1\n"
+            "7. NEVER add explanations or comments\n"
+            "8. Output ONLY the corrected text, nothing else\n\n"
+            f"TEXT:\n{text}\n\n"
+            "CORRECTED TEXT (with ONLY the fixes above):"
+        )
 
-            # Split page into chunks
-            page_chunks = self.chunk_text(text_clean)
-
-            for chunk_text in page_chunks:
-                chunk_text = chunk_text.strip()
-                if not chunk_text:
-                    continue
-
-                # Generate chunk hash for deduplication
-                chunk_hash = hashlib.sha256(chunk_text.encode()).hexdigest()
-
-                # Skip if duplicate
-                if chunk_hash in existing_hashes:
-                    logger.debug(f"Skipping duplicate chunk: {chunk_hash[:8]}...")
-                    continue
-
-                chunk_id += 1
-
-                # Count tokens
-                token_count = self.token_counter.count(chunk_text)
-
-                # Extract image OCR from page if available
-                image_texts = [img.get('ocr_text', '') for img in images if img.get('ocr_text')]
-                image_text_combined = ' '.join(image_texts)
-
-                # Create chunk metadata
-                chunk_metadata = {
-                    'chunk_id': chunk_id,
-                    'chunk_hash': chunk_hash,
-                    'customer_id': customer_id,
-                    'doc_name': doc_name,
-                    'page_num': page_num,
-                    'text_length': len(chunk_text),
-                    'token_count': token_count,
-                    'created_at': datetime.now().isoformat(),
-                    'has_images': len(images) > 0,
-                    'image_text': image_text_combined[:500] if image_text_combined else None
-                }
-
-                chunks.append({
-                    'metadata': chunk_metadata,
-                    'text': chunk_text
-                })
-
-                existing_hashes.add(chunk_hash)
-
-        logger.info(f"Chunked {doc_name}: {chunk_id} chunks from {len(pages)} pages")
-
-        return chunks
-
-
-class RAGChunker:
-    """Coordinate chunking for all customer documents"""
-
-    def __init__(
-        self,
-        chunk_size: int = 600,
-        chunk_overlap: int = 150,
-        server_root: Optional[Path] = None
-    ):
-        """Initialize RAG chunker"""
-        self.chunker = DocumentChunker(chunk_size, chunk_overlap)
-        self.server_root = server_root or Path('/home/aiadmin/netovo_voicebot/audiosockets')
-
-    def chunk_customer_documents(self, customer_id: str) -> Dict:
-        """
-        Chunk all documents for a customer
-
-        Directory structure:
-        customers/{customer_id}/{pdf_name}/
-        ├── content.json (extracted, raw)
-        ├── content_cleaned.json (cleaned, ready for chunking)
-        └── images/
-
-        Returns:
-            {
-                'customer_id': '...',
-                'documents_processed': N,
-                'total_chunks': N,
-                'chunks': [...],
-                'created_at': '...'
-            }
-        """
-        print(f"\n[CHUNK] Processing customer: {customer_id}")
-        print("=" * 70)
-
-        # Paths
-        customer_dir = self.server_root / "customers" / customer_id
-        kb_metadata_path = customer_dir / "kb_metadata.json"
-
-        if not customer_dir.exists():
-            logger.error(f"Customer directory not found: {customer_dir}")
-            return {'status': 'error', 'message': 'No customer directory'}
-
-        # Load existing chunk hashes for deduplication
-        existing_hashes = set()
-        if kb_metadata_path.exists():
-            with open(kb_metadata_path, 'r', encoding='utf-8') as f:
-                kb_metadata = json.load(f)
-                for file_info in kb_metadata.get('files', {}).values():
-                    existing_hashes.update(file_info.get('chunk_hashes', []))
-
-        # Process each PDF folder in customer directory
-        all_chunks = []
-        documents_processed = 0
-
-        for pdf_dir in sorted(customer_dir.iterdir()):
-            if not pdf_dir.is_dir():
-                continue
-
-            # Skip metadata files
-            if pdf_dir.name == 'kb_metadata.json':
-                continue
-
-            # Look for content_cleaned.json (cleaned content)
-            cleaned_file = pdf_dir / "content_cleaned.json"
-            if not cleaned_file.exists():
-                logger.debug(f"No content_cleaned.json in {pdf_dir.name}, skipping")
-                continue
-
-            # Load cleaned content
+        for attempt in range(max_retries):
             try:
-                with open(cleaned_file, 'r', encoding='utf-8') as f:
-                    cleaned_data = json.load(f)
+                logger.debug(f"Cleaning text with {self.model} (attempt {attempt + 1}/{max_retries})")
 
-                doc_name = pdf_dir.name
-                pages = cleaned_data.get('pages', [])
-
-                print(f"  Chunking {doc_name}...")
-                logger.info(f"Chunking document: {doc_name}")
-
-                # Chunk document
-                doc_chunks = self.chunker.chunk_document(
-                    customer_id=customer_id,
-                    doc_name=doc_name,
-                    pages=pages,
-                    existing_hashes=existing_hashes
+                response = requests.post(
+                    f"{self.ollama_url}/api/generate",
+                    json={
+                        "model": self.model,
+                        "prompt": prompt,
+                        "stream": False,
+                        "temperature": 0.1
+                    },
+                    timeout=self.timeout
                 )
 
-                print(f"    [OK] Created {len(doc_chunks)} chunks")
-                logger.info(f"Created {len(doc_chunks)} chunks for {doc_name}")
+                if response.status_code == 200:
+                    cleaned_text = response.json().get("response", "").strip()
+                    return cleaned_text if cleaned_text else text
+                else:
+                    logger.warning(f"Ollama returned status {response.status_code}: {response.text[:200]}")
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** attempt
+                        logger.info(f"Retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"Failed to clean text after {max_retries} attempts")
+                        return text
 
-                # Save chunked result to content_chunked.json
-                chunked_output = pdf_dir / "content_chunked.json"
-                chunked_data = {
-                    'metadata': cleaned_data.get('metadata', {}),
-                    'chunks': doc_chunks,
-                    'chunked_at': datetime.now().isoformat()
-                }
+            except requests.exceptions.Timeout:
+                logger.warning(f"Timeout cleaning text (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    logger.error(f"Text cleaning timed out after {max_retries} attempts")
+                    return text
+            except Exception as e:
+                logger.error(f"Error cleaning text: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    return text
 
-                with open(chunked_output, 'w', encoding='utf-8') as f:
-                    json.dump(chunked_data, f, indent=2, ensure_ascii=False)
+        return text
 
-                all_chunks.extend(doc_chunks)
-                documents_processed += 1
+    def is_boilerplate_ocr(self, ocr_text: str) -> bool:
+        """Check if OCR text is only boilerplate content"""
+        boilerplate_ocr_patterns = [
+            r'MADISON\s+TECHNOLO[GC].*?Managed Hosting.*?Services',
+            r'Powered by FileCloud',
+        ]
+
+        for pattern in boilerplate_ocr_patterns:
+            if re.search(pattern, ocr_text, flags=re.IGNORECASE | re.DOTALL):
+                return True
+
+        return False
+
+    def clean_extraction_result(self, extraction_json: Dict) -> Dict:
+        """
+        Clean all text in an extraction result
+
+        IMPORTANT: OCR text from images is cleaned but kept SEPARATE from PDF text
+        This preserves the distinction between:
+        - PDF text: procedural instructions and documentation
+        - OCR text: visual context from interface screenshots
+        """
+        pdf_name = extraction_json['metadata'].get('pdf_name', 'unknown')
+        logger.info(f"Cleaning extraction result for {pdf_name}")
+
+        cleaned_result = extraction_json.copy()
+        cleaned_pages = []
+
+        for page_data in extraction_json['pages']:
+            cleaned_page = page_data.copy()
+
+            # Clean PDF text
+            # Note: extraction_pipeline.py creates pages with 'text' key, not 'pdf_text'
+            pdf_text = page_data.get('text', '').strip()
+
+            if pdf_text:
+                logger.debug(f"Cleaning page {page_data['page_num']} PDF text ({len(pdf_text)} chars)")
+                cleaned_pdf_text = self.clean_text_with_llm(pdf_text)
+                logger.debug(f"Cleaned to {len(cleaned_pdf_text)} chars")
+                cleaned_page['pdf_text'] = cleaned_pdf_text
+            else:
+                cleaned_page['pdf_text'] = ""
+
+            # Clean OCR text from images (with filtering)
+            cleaned_images = []
+            removed_images = 0
+
+            for img_data in page_data.get('images', []):
+                ocr_text = img_data.get('ocr_text', '').strip()
+                ocr_confidence = img_data.get('confidence', 1.0)
+
+                # FILTER 1: Skip images with boilerplate-only OCR
+                if self.is_boilerplate_ocr(ocr_text):
+                    logger.debug(f"Skipping image: OCR is boilerplate only")
+                    removed_images += 1
+                    continue
+
+                # FILTER 2: Skip images with very low confidence
+                if ocr_confidence < 0.5:
+                    logger.debug(f"Skipping image: OCR confidence too low ({ocr_confidence})")
+                    removed_images += 1
+                    continue
+
+                # FILTER 3: Skip images with no OCR text
+                if not ocr_text:
+                    logger.debug(f"Skipping image: No OCR text")
+                    removed_images += 1
+                    continue
+
+                # Image passed filters - clean it
+                cleaned_img = img_data.copy()
+
+                logger.debug(f"Cleaning image OCR ({len(ocr_text)} chars, confidence: {ocr_confidence})")
+                cleaned_ocr_text = self.clean_text_with_llm(ocr_text)
+                logger.debug(f"Cleaned to {len(cleaned_ocr_text)} chars")
+                cleaned_img['ocr_text'] = cleaned_ocr_text
+
+                cleaned_images.append(cleaned_img)
+
+            if removed_images > 0:
+                logger.debug(f"Page {page_data['page_num']}: Removed {removed_images} images")
+
+            cleaned_page['images'] = cleaned_images
+            cleaned_pages.append(cleaned_page)
+
+        cleaned_result['pages'] = cleaned_pages
+        cleaned_result['metadata']['cleaned_at'] = datetime.now().isoformat()
+        cleaned_result['metadata']['cleaning_notes'] = (
+            "Three-filter cleaning: 1) Remove boilerplate-only OCR images (Madison headers, FileCloud footers), "
+            "2) Remove low-confidence OCR (< 0.5), 3) LLM semantic fixing (OCR errors, hyphenation). "
+            "Numbered steps and newlines preserved for procedural structure. "
+            "OCR text kept separate from PDF text to preserve visual context distinction."
+        )
+
+        return cleaned_result
+
+
+class CleaningPipeline:
+    """Manage text cleaning for customers"""
+
+    def __init__(self, server_root: Path, ollama_url: str = "http://localhost:11434"):
+        global logger
+
+        self.server_root = Path(server_root)
+        self.ollama_url = ollama_url
+
+        logs_dir = self.server_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        if logger is None:
+            logging.basicConfig(
+                level=logging.INFO,
+                format='%(asctime)s - CLEANING - %(levelname)s - %(message)s',
+                handlers=[
+                    logging.FileHandler(str(logs_dir / 'cleaning.log'), encoding='utf-8'),
+                    logging.StreamHandler()
+                ]
+            )
+            logger = logging.getLogger(__name__)
+
+        logger.info(f"Cleaning pipeline initialized with root: {self.server_root}")
+        logger.info(f"Ollama URL: {self.ollama_url}")
+
+    def clean_single_file(self, json_path: Path) -> bool:
+        """Clean a single extracted JSON file"""
+
+        if not json_path.exists():
+            logger.error(f"File not found: {json_path}")
+            return False
+
+        try:
+            logger.info(f"Cleaning file: {json_path}")
+
+            with open(json_path, 'r', encoding='utf-8') as f:
+                extraction_result = json.load(f)
+
+            cleaner = TextCleaner(self.ollama_url)
+            cleaned_result = cleaner.clean_extraction_result(extraction_result)
+
+            # Save with _cleaned suffix
+            cleaned_path = json_path.parent / f"{json_path.stem}_cleaned.json"
+            with open(cleaned_path, 'w', encoding='utf-8') as f:
+                json.dump(cleaned_result, f, indent=2, ensure_ascii=False)
+
+            logger.info(f"Saved cleaned result to {cleaned_path}")
+            print(f"[OK] Cleaned: {json_path.name} -> {cleaned_path.name}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to clean {json_path}: {e}")
+            print(f"[ERROR] {json_path.name}: {e}")
+            return False
+
+    def clean_customer(self, customer_id: str) -> Dict:
+        """Clean all extracted PDFs for one customer"""
+        customer_dir = self.server_root / "customers" / customer_id
+        extracted_dir = customer_dir / customer_id
+
+        if not extracted_dir.exists():
+            logger.warning(f"No extracted documents folder for {customer_id}")
+            return {
+                'customer_id': customer_id,
+                'status': 'no_documents',
+                'total_documents': 0,
+                'cleaned': 0,
+                'failed': 0
+            }
+
+        extracted_files = list(extracted_dir.glob("*/content.json"))
+
+        cleaned_count = 0
+        failed_count = 0
+
+        print(f"\n[CLEAN] Starting cleaning for customer: {customer_id}")
+        print("="*70)
+
+        for extracted_json_path in sorted(extracted_files):
+            try:
+                print(f"  [{extracted_json_path.parent.name}] Cleaning...")
+
+                with open(extracted_json_path, 'r', encoding='utf-8') as f:
+                    extraction_result = json.load(f)
+
+                cleaner = TextCleaner(self.ollama_url)
+                cleaned_result = cleaner.clean_extraction_result(extraction_result)
+
+                cleaned_json_path = extracted_json_path.parent / "content_cleaned.json"
+                with open(cleaned_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(cleaned_result, f, indent=2, ensure_ascii=False)
+
+                print(f"    [OK] {len(cleaned_result['pages'])} pages cleaned")
+                cleaned_count += 1
 
             except Exception as e:
-                logger.error(f"Failed to chunk {pdf_dir.name}: {e}")
+                logger.error(f"Failed to clean {extracted_json_path.parent.name}: {e}")
                 print(f"    [ERROR] {e}")
-                continue
+                failed_count += 1
 
-        # Update kb_metadata.json with chunk hashes
-        if kb_metadata_path.exists():
-            with open(kb_metadata_path, 'r', encoding='utf-8') as f:
-                kb_metadata = json.load(f)
-        else:
-            kb_metadata = {'files': {}}
-
-        for chunk in all_chunks:
-            doc_name = chunk['metadata']['doc_name']
-            chunk_hash = chunk['metadata']['chunk_hash']
-
-            if doc_name not in kb_metadata['files']:
-                kb_metadata['files'][doc_name] = {'chunk_hashes': []}
-
-            if chunk_hash not in kb_metadata['files'][doc_name]['chunk_hashes']:
-                kb_metadata['files'][doc_name]['chunk_hashes'].append(chunk_hash)
-
-        with open(kb_metadata_path, 'w', encoding='utf-8') as f:
-            json.dump(kb_metadata, f, indent=2, ensure_ascii=False)
-
-        logger.info(f"Updated kb_metadata.json for {customer_id}")
-
-        print("\n" + "=" * 70)
+        print("="*70)
         print(f"[SUMMARY] {customer_id}")
-        print(f"  Documents processed: {documents_processed}")
-        print(f"  Total chunks created: {len(all_chunks)}")
-        if all_chunks:
-            token_counts = [c['metadata']['token_count'] for c in all_chunks]
-            print(f"  Avg chunk size: {sum(token_counts) // len(token_counts)} tokens")
-            print(f"  Token range: {min(token_counts)}-{max(token_counts)}")
+        print(f"  Cleaned: {cleaned_count}")
+        print(f"  Failed: {failed_count}")
+        print(f"  Total: {len(extracted_files)}")
 
         return {
             'customer_id': customer_id,
-            'documents_processed': documents_processed,
-            'total_chunks': len(all_chunks),
-            'chunks': all_chunks,
-            'created_at': datetime.now().isoformat()
+            'status': 'success' if failed_count == 0 else 'partial',
+            'total_documents': len(extracted_files),
+            'cleaned': cleaned_count,
+            'failed': failed_count
         }
 
-    def chunk_all_customers(self, customer_ids: Optional[List[str]] = None) -> Dict:
-        """Chunk documents for all customers"""
-        print("\n" + "=" * 70)
-        print("RAG DOCUMENT CHUNKING")
-        print("=" * 70)
+    def clean_all_customers(self, customer_filter: Optional[List[str]] = None) -> Dict:
+        """Clean extracted documents for all customers"""
+        print("\n" + "="*70)
+        print("TEXT CLEANING PIPELINE")
+        print("="*70)
+
+        customers_dir = self.server_root / "customers"
+
+        if not customers_dir.exists():
+            logger.error(f"Customers directory not found: {customers_dir}")
+            return {}
+
+        all_customers = []
+        for customer_folder in sorted(customers_dir.glob("*")):
+            if customer_folder.is_dir():
+                extracted_dir = customer_folder / customer_folder.name
+                if extracted_dir.exists() and any(extracted_dir.glob("*/content.json")):
+                    all_customers.append(customer_folder.name)
+
+        print(f"\n[DISCOVER] Found {len(all_customers)} customers with extracted documents")
+        for customer_id in all_customers:
+            print(f"  - {customer_id}")
+
+        if customer_filter:
+            all_customers = [c for c in all_customers if c in customer_filter]
+            print(f"\n[FILTER] Processing {len(all_customers)} selected customers")
 
         results = {}
-
-        # Get customer list
-        if customer_ids is None:
-            customers_dir = self.server_root / "customers"
-            customer_ids = [d.name for d in customers_dir.iterdir() if d.is_dir()]
-
-        for customer_id in customer_ids:
-            result = self.chunk_customer_documents(customer_id)
+        for customer_id in all_customers:
+            result = self.clean_customer(customer_id)
             results[customer_id] = result
 
-        # Final summary
-        print("\n" + "=" * 70)
-        print("CHUNKING COMPLETE")
-        print("=" * 70)
+        # Print final summary
+        print("\n" + "="*70)
+        print("CLEANING SUMMARY")
+        print("="*70)
 
-        total_chunks = sum(r.get('total_chunks', 0) for r in results.values())
-        print(f"Total customers: {len(results)}")
-        print(f"Total chunks: {total_chunks}")
+        total_documents = sum(r['total_documents'] for r in results.values())
+        total_cleaned = sum(r['cleaned'] for r in results.values())
+        total_failed = sum(r['failed'] for r in results.values())
+
+        for customer_id, result in sorted(results.items()):
+            status_icon = "[OK]" if result['status'] == 'success' else "[WARN]"
+            print(f"{status_icon} {customer_id:25} {result['cleaned']}/{result['total_documents']} cleaned")
+
+        print("\n" + "-"*70)
+        print(f"Total Documents: {total_documents}")
+        print(f"Cleaned: {total_cleaned}")
+        print(f"Failed: {total_failed}")
+        print("="*70)
 
         return results
 
 
-def chunk_single_file(cleaned_file_path: Path) -> bool:
-    """Chunk a single content_cleaned.json file"""
-    cleaned_file_path = Path(cleaned_file_path)
-
-    if not cleaned_file_path.exists():
-        logger.error(f"File not found: {cleaned_file_path}")
-        print(f"[ERROR] File not found: {cleaned_file_path}")
-        return False
-
-    try:
-        # Extract customer and document name from path
-        # Expected: /path/to/customers/{customer_id}/{pdf_name}/content_cleaned.json
-        parts = cleaned_file_path.parts
-        pdf_name = parts[-2]
-        customer_id = parts[-3]
-
-        print("\n" + "=" * 70)
-        print(f"CHUNKING SINGLE FILE: {customer_id}/{pdf_name}")
-        print("=" * 70)
-
-        # Load cleaned content
-        with open(cleaned_file_path, 'r', encoding='utf-8') as f:
-            cleaned_data = json.load(f)
-
-        pages = cleaned_data.get('pages', [])
-        print(f"  Pages: {len(pages)}")
-
-        # Initialize chunker
-        chunker_obj = DocumentChunker(chunk_size=600, chunk_overlap=150)
-
-        # Chunk document
-        doc_chunks = chunker_obj.chunk_document(
-            customer_id=customer_id,
-            doc_name=pdf_name,
-            pages=pages,
-            existing_hashes=set()
-        )
-
-        print(f"  Chunks created: {len(doc_chunks)}")
-
-        if doc_chunks:
-            token_counts = [c['metadata']['token_count'] for c in doc_chunks]
-            print(f"  Token range: {min(token_counts)}-{max(token_counts)} (avg {sum(token_counts) // len(token_counts)})")
-
-        # Save chunked result
-        chunked_output = cleaned_file_path.parent / "content_chunked.json"
-        chunked_data = {
-            'metadata': cleaned_data.get('metadata', {}),
-            'chunks': doc_chunks,
-            'chunked_at': datetime.now().isoformat()
-        }
-
-        with open(chunked_output, 'w', encoding='utf-8') as f:
-            json.dump(chunked_data, f, indent=2, ensure_ascii=False)
-
-        print(f"\n[OK] Saved: {chunked_output.name}")
-        print("=" * 70)
-        logger.info(f"Successfully chunked {customer_id}/{pdf_name}")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to chunk file {cleaned_file_path}: {e}", exc_info=True)
-        print(f"[ERROR] {e}")
-        return False
-
-
 def main():
-    if DOTENV_AVAILABLE:
-        load_dotenv()
-
-    server_root = os.getenv('SERVER_ROOT', '/home/aiadmin/netovo_voicebot/kokora/audiosocket')
-
-    import argparse
     parser = argparse.ArgumentParser(
-        description='Token-Aware Document Chunking for RAG',
+        description='Text Cleaning Pipeline for Server',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
+        epilog="""
 Examples:
-  # Chunk single file
-  python chunker.py --file /path/to/customers/customer_id/PDF_Name/content_cleaned.json
+  # Clean single file
+  python clean_documents_server.py --file /path/to/content.json
 
-  # Chunk all documents for one customer
-  python chunker.py --customer customer_id
+  # Clean all documents for one customer
+  python clean_documents_server.py --customer CUSTOMER_ID
 
-  # Chunk specific customers
-  python chunker.py --customers stuart_dean cidny
+  # Clean all documents
+  python clean_documents_server.py --all
 
-  # Chunk all customers
-  python chunker.py --all
-
-  # Custom server root
-  python chunker.py --server-root /path/to/server --customer customer_id
-        '''
+  # Clean specific customers
+  python clean_documents_server.py --customers CUST1 CUST2
+        """
     )
-    parser.add_argument('--server-root', default=server_root, help='Server root directory')
-    parser.add_argument('--file', type=Path, help='Chunk single content_cleaned.json file')
-    parser.add_argument('--customer', help='Chunk all documents for one customer')
-    parser.add_argument('--customers', nargs='+', help='Chunk specific customers')
-    parser.add_argument('--all', action='store_true', help='Chunk all customers')
+
+    parser.add_argument('--server-root', default='/home/aiadmin/netovo_voicebot/kokora/audiosocket',
+                       help='Server root directory')
+    parser.add_argument('--ollama-url', default='http://localhost:11434',
+                       help='Ollama API URL')
+    parser.add_argument('--file', type=Path, help='Clean single extraction file')
+    parser.add_argument('--customer', help='Clean all documents for one customer')
+    parser.add_argument('--customers', nargs='+', help='Clean specific customers')
+    parser.add_argument('--all', action='store_true', help='Clean all customers')
 
     args = parser.parse_args()
 
+    server_root = Path(args.server_root)
+
     try:
-        # Mode 1: Single file
+        pipeline = CleaningPipeline(server_root, args.ollama_url)
+
         if args.file:
-            success = chunk_single_file(args.file)
-            return 0 if success else 1
+            # Clean single file
+            success = pipeline.clean_single_file(args.file)
+            sys.exit(0 if success else 1)
 
-        # Mode 2: Multiple modes
-        server_root_path = Path(args.server_root)
-        chunker = RAGChunker(
-            chunk_size=600,
-            chunk_overlap=150,
-            server_root=server_root_path
-        )
+        elif args.customer:
+            # Clean one customer
+            result = pipeline.clean_customer(args.customer)
+            sys.exit(0 if result['status'] in ['success', 'no_documents'] else 1)
 
-        # Determine customers to process
-        if args.customer:
-            # Single customer
-            customer_ids = [args.customer]
         elif args.customers:
-            # Multiple customers
-            customer_ids = args.customers
+            # Clean specific customers
+            results = pipeline.clean_all_customers(customer_filter=args.customers)
+            failed = sum(1 for r in results.values() if r['status'] not in ['success', 'no_documents'])
+            sys.exit(1 if failed > 0 else 0)
+
         elif args.all:
-            # All customers
-            customer_ids = None
+            # Clean all customers
+            results = pipeline.clean_all_customers()
+            failed = sum(1 for r in results.values() if r['status'] not in ['success', 'no_documents'])
+            sys.exit(1 if failed > 0 else 0)
+
         else:
-            # Default: all customers
-            customer_ids = None
-
-        results = chunker.chunk_all_customers(customer_ids=customer_ids)
-
-        # Summary
-        total_chunks = sum(r.get('total_chunks', 0) for r in results.values())
-        return 0 if total_chunks > 0 else 1
+            parser.print_help()
+            sys.exit(0)
 
     except Exception as e:
-        logger.error(f"Chunking failed: {e}", exc_info=True)
-        return 1
+        logger.error(f"Cleaning pipeline failed: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    main()
