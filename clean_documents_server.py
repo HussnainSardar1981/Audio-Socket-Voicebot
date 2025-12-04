@@ -143,18 +143,13 @@ class TextCleaner:
 
         # Stage 2: LLM-based semantic cleaning
         prompt = (
-            "You are a text reconstruction specialist. Fix ONLY actual errors, make ZERO other changes.\n\n"
-            "STRICT RULES (follow exactly):\n"
-            "1. REMOVE lines starting with 'Prepared by Madison Technology for' (boilerplate document prep line)\n"
-            "2. Fix broken hyphenated words ONLY: 'informa-\\ntion' becomes 'information'\n"
-            "3. Fix ONLY clear OCR character substitutions: '1l' to 'll', 'rn' to 'm', 'O' to '0' if numbers expected\n"
-            "4. Fix ONLY broken sentences from line breaks (rejoin split words)\n"
-            "5. PRESERVE ALL OTHER TEXT EXACTLY AS-IS\n"
-            "6. NEVER remove any other words or content besides rule 1\n"
-            "7. NEVER add explanations or comments\n"
-            "8. Output ONLY the corrected text, nothing else\n\n"
-            f"TEXT:\n{text}\n\n"
-            "CORRECTED TEXT (with ONLY the fixes above):"
+            "Fix this text. Apply only these fixes:\n"
+            "1. Remove 'Prepared by Madison Technology for' lines\n"
+            "2. Fix hyphenated word breaks (e.g., 'informa-\\ntion' → 'information')\n"
+            "3. Fix OCR errors: '1l'→'ll', 'rn'→'m'\n"
+            "4. Rejoin broken sentences from line breaks\n"
+            "CRITICAL: Keep all other text. No explanations. Output only the fixed text.\n\n"
+            f"{text}"
         )
 
         for attempt in range(max_retries):
@@ -174,6 +169,19 @@ class TextCleaner:
 
                 if response.status_code == 200:
                     cleaned_text = response.json().get("response", "").strip()
+
+                    # Post-process: Remove common LLM explanations/markers
+                    # If LLM added "CORRECTED TEXT:" or similar markers, extract text after that
+                    for marker in ["CORRECTED TEXT:", "Here is", "Here's the", "FIXED TEXT:", "Corrected:", "STRICT RULES"]:
+                        if marker in cleaned_text:
+                            # Take everything after the marker
+                            cleaned_text = cleaned_text.split(marker, 1)[-1].strip()
+
+                    # Remove trailing explanations
+                    for closing in ["No character substitutions", "No changes needed", "following corrections"]:
+                        if closing in cleaned_text:
+                            cleaned_text = cleaned_text.split(closing)[0].strip()
+
                     return cleaned_text if cleaned_text else text
                 else:
                     logger.warning(f"Ollama returned status {response.status_code}: {response.text[:200]}")
