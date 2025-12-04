@@ -170,15 +170,30 @@ class TextCleaner:
                 if response.status_code == 200:
                     cleaned_text = response.json().get("response", "").strip()
 
-                    # Post-process: Remove common LLM explanations/markers
-                    # If LLM added "CORRECTED TEXT:" or similar markers, extract text after that
-                    for marker in ["CORRECTED TEXT:", "Here is", "Here's the", "FIXED TEXT:", "Corrected:", "STRICT RULES"]:
+                    # Post-process: Remove common LLM preambles and explanations
+                    # Remove starting markers (case-insensitive)
+                    start_markers = [
+                        "the revised text:",
+                        "the fixed text:",
+                        "corrected text:",
+                        "here is the corrected",
+                        "here's the corrected",
+                        "corrected:",
+                        "fixed:",
+                        "revised:",
+                    ]
+                    for marker in start_markers:
+                        if cleaned_text.lower().startswith(marker):
+                            cleaned_text = cleaned_text[len(marker):].strip()
+                            break
+
+                    # Remove inline markers if still present
+                    for marker in ["CORRECTED TEXT:", "FIXED TEXT:", "REVISED TEXT:", "Here is the fixed", "Here is the"]:
                         if marker in cleaned_text:
-                            # Take everything after the marker
                             cleaned_text = cleaned_text.split(marker, 1)[-1].strip()
 
                     # Remove trailing explanations
-                    for closing in ["No character substitutions", "No changes needed", "following corrections"]:
+                    for closing in ["No character substitutions", "No changes needed", "following corrections", "STRICT RULES FOLLOWED"]:
                         if closing in cleaned_text:
                             cleaned_text = cleaned_text.split(closing)[0].strip()
 
