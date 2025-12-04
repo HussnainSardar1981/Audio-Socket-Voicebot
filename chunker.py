@@ -455,6 +455,72 @@ class RAGChunker:
         return results
 
 
+def chunk_single_file(cleaned_file_path: Path) -> bool:
+    """Chunk a single content_cleaned.json file"""
+    cleaned_file_path = Path(cleaned_file_path)
+
+    if not cleaned_file_path.exists():
+        logger.error(f"File not found: {cleaned_file_path}")
+        print(f"[ERROR] File not found: {cleaned_file_path}")
+        return False
+
+    try:
+        # Extract customer and document name from path
+        # Expected: /path/to/customers/{customer_id}/{pdf_name}/content_cleaned.json
+        parts = cleaned_file_path.parts
+        pdf_name = parts[-2]
+        customer_id = parts[-3]
+
+        print("\n" + "=" * 70)
+        print(f"CHUNKING SINGLE FILE: {customer_id}/{pdf_name}")
+        print("=" * 70)
+
+        # Load cleaned content
+        with open(cleaned_file_path, 'r', encoding='utf-8') as f:
+            cleaned_data = json.load(f)
+
+        pages = cleaned_data.get('pages', [])
+        print(f"  Pages: {len(pages)}")
+
+        # Initialize chunker
+        chunker_obj = DocumentChunker(chunk_size=600, chunk_overlap=150)
+
+        # Chunk document
+        doc_chunks = chunker_obj.chunk_document(
+            customer_id=customer_id,
+            doc_name=pdf_name,
+            pages=pages,
+            existing_hashes=set()
+        )
+
+        print(f"  Chunks created: {len(doc_chunks)}")
+
+        if doc_chunks:
+            token_counts = [c['metadata']['token_count'] for c in doc_chunks]
+            print(f"  Token range: {min(token_counts)}-{max(token_counts)} (avg {sum(token_counts) // len(token_counts)})")
+
+        # Save chunked result
+        chunked_output = cleaned_file_path.parent / "content_chunked.json"
+        chunked_data = {
+            'metadata': cleaned_data.get('metadata', {}),
+            'chunks': doc_chunks,
+            'chunked_at': datetime.now().isoformat()
+        }
+
+        with open(chunked_output, 'w', encoding='utf-8') as f:
+            json.dump(chunked_data, f, indent=2, ensure_ascii=False)
+
+        print(f"\n[OK] Saved: {chunked_output.name}")
+        print("=" * 70)
+        logger.info(f"Successfully chunked {customer_id}/{pdf_name}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to chunk file {cleaned_file_path}: {e}", exc_info=True)
+        print(f"[ERROR] {e}")
+        return False
+
+
 def main():
     if DOTENV_AVAILABLE:
         load_dotenv()
@@ -467,35 +533,67 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 Examples:
-  # Chunk all customers
-  python chunker.py
+  # Chunk single file
+  python chunker.py --file /path/to/customers/customer_id/PDF_Name/content_cleaned.json
+
+  # Chunk all documents for one customer
+  python chunker.py --customer customer_id
 
   # Chunk specific customers
   python chunker.py --customers stuart_dean cidny
 
-  # Chunk specific customer and their PDFs
-  python chunker.py --customers stuart_dean
+  # Chunk all customers
+  python chunker.py --all
 
   # Custom server root
-  python chunker.py --server-root /path/to/server
+  python chunker.py --server-root /path/to/server --customer customer_id
         '''
     )
-    parser.add_argument('--customers', nargs='+', help='Specific customers to process (by ID)')
     parser.add_argument('--server-root', default=server_root, help='Server root directory')
+    parser.add_argument('--file', type=Path, help='Chunk single content_cleaned.json file')
+    parser.add_argument('--customer', help='Chunk all documents for one customer')
+    parser.add_argument('--customers', nargs='+', help='Chunk specific customers')
+    parser.add_argument('--all', action='store_true', help='Chunk all customers')
+
     args = parser.parse_args()
 
-    chunker = RAGChunker(
-        chunk_size=600,
-        chunk_overlap=150,
-        server_root=Path(args.server_root)
-    )
+    try:
+        # Mode 1: Single file
+        if args.file:
+            success = chunk_single_file(args.file)
+            return 0 if success else 1
 
-    # Chunk customers
-    results = chunker.chunk_all_customers(customer_ids=args.customers)
+        # Mode 2: Multiple modes
+        server_root_path = Path(args.server_root)
+        chunker = RAGChunker(
+            chunk_size=600,
+            chunk_overlap=150,
+            server_root=server_root_path
+        )
 
-    # Summary
-    total_chunks = sum(r.get('total_chunks', 0) for r in results.values())
-    return 0 if total_chunks > 0 else 1
+        # Determine customers to process
+        if args.customer:
+            # Single customer
+            customer_ids = [args.customer]
+        elif args.customers:
+            # Multiple customers
+            customer_ids = args.customers
+        elif args.all:
+            # All customers
+            customer_ids = None
+        else:
+            # Default: all customers
+            customer_ids = None
+
+        results = chunker.chunk_all_customers(customer_ids=customer_ids)
+
+        # Summary
+        total_chunks = sum(r.get('total_chunks', 0) for r in results.values())
+        return 0 if total_chunks > 0 else 1
+
+    except Exception as e:
+        logger.error(f"Chunking failed: {e}", exc_info=True)
+        return 1
 
 
 if __name__ == '__main__':
