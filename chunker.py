@@ -459,16 +459,39 @@ def main():
     if DOTENV_AVAILABLE:
         load_dotenv()
 
-    server_root = os.getenv('SERVER_ROOT', '/home/aiadmin/netovo_voicebot/audiosockets')
+    server_root = os.getenv('SERVER_ROOT', '/home/aiadmin/netovo_voicebot/kokora/audiosocket')
+
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Token-Aware Document Chunking for RAG',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Chunk all customers
+  python chunker.py
+
+  # Chunk specific customers
+  python chunker.py --customers stuart_dean cidny
+
+  # Chunk specific customer and their PDFs
+  python chunker.py --customers stuart_dean
+
+  # Custom server root
+  python chunker.py --server-root /path/to/server
+        '''
+    )
+    parser.add_argument('--customers', nargs='+', help='Specific customers to process (by ID)')
+    parser.add_argument('--server-root', default=server_root, help='Server root directory')
+    args = parser.parse_args()
 
     chunker = RAGChunker(
         chunk_size=600,
         chunk_overlap=150,
-        server_root=Path(server_root)
+        server_root=Path(args.server_root)
     )
 
-    # Chunk all customers
-    results = chunker.chunk_all_customers()
+    # Chunk customers
+    results = chunker.chunk_all_customers(customer_ids=args.customers)
 
     # Summary
     total_chunks = sum(r.get('total_chunks', 0) for r in results.values())
