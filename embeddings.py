@@ -418,6 +418,20 @@ def main():
     # Get server root from environment or use default
     server_root = os.getenv('SERVER_ROOT', '/home/aiadmin/netovo_voicebot/kokora/audiosocket')
 
+    # Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Generate embeddings from chunked documents',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python embeddings.py                                    # Embed all customers
+  python embeddings.py --file /path/to/content_chunked.json  # Embed single file
+        """
+    )
+    parser.add_argument('--file', type=Path, help='Embed single content_chunked.json file')
+    args = parser.parse_args()
+
     try:
         # Initialize embedder with highest-accuracy model
         # BAAI/bge-base-en-v1.5 is recommended for technical documentation RAG
@@ -428,12 +442,52 @@ def main():
             server_root=Path(server_root)
         )
 
-        # Embed all customers
-        results = embedder.embed_all_customers()
+        # If --file argument provided, embed single file
+        if args.file:
+            chunked_file = Path(args.file)
+            if not chunked_file.exists():
+                print(f"[ERROR] File not found: {chunked_file}")
+                return 1
 
-        # Return success if all customers processed
-        success = all(r['status'] in ['success', 'no_chunked_documents'] for r in results.values())
-        return 0 if success else 1
+            print(f"\n[SINGLE FILE] Processing: {chunked_file}")
+            print("=" * 70)
+
+            try:
+                with open(chunked_file, 'r', encoding='utf-8') as f:
+                    chunked_data = json.load(f)
+
+                chunks = chunked_data.get('chunks', [])
+                if not chunks:
+                    print("[WARN] No chunks found in file")
+                    return 0
+
+                # Extract customer_id from chunks metadata
+                customer_id = chunks[0].get('metadata', {}).get('customer_id', 'unknown')
+
+                # Embed
+                result = embedder.embed_customer_chunks(customer_id, chunks)
+
+                if result.get('status') != 'no_chunks':
+                    # Save to content_embedded.json in same directory
+                    embedded_file = chunked_file.parent / "content_embedded.json"
+                    embedder.embed_and_save(customer_id, chunks, embedded_file)
+                    print(f"\n[OK] Embeddings saved to: {embedded_file}")
+                    return 0
+                else:
+                    return 1
+
+            except Exception as e:
+                logger.error(f"Failed to embed file: {e}", exc_info=True)
+                print(f"[ERROR] {e}")
+                return 1
+
+        else:
+            # Embed all customers
+            results = embedder.embed_all_customers()
+
+            # Return success if all customers processed
+            success = all(r['status'] in ['success', 'no_chunked_documents'] for r in results.values())
+            return 0 if success else 1
 
     except Exception as e:
         logger.error(f"Embedding pipeline failed: {e}", exc_info=True)
