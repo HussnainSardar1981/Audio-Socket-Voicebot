@@ -125,102 +125,32 @@ class TextCleaner:
         except Exception as e:
             logger.warning(f"Could not verify Ollama connection: {e}")
 
-    def clean_text_with_llm(self, text: str, max_retries: int = 3) -> str:
+    def clean_text_programmatically(self, text: str) -> str:
         """
-        Use LLM to clean extracted text
-        Two-stage process:
-        1. Rigorous programmatic cleanup (boilerplate, whitespace)
-        2. LLM semantic fixing (OCR errors, hyphenation)
+        Clean extracted text using only programmatic (regex-based) methods
+        No LLM needed - deterministic and fast
         """
         if not text.strip():
             return ""
 
-        # Stage 1: Rigorous pre-cleanup (removes structural noise)
+        # Stage: Rigorous programmatic cleanup (removes boilerplate, OCR artifacts, whitespace)
         text = rigorous_pre_cleanup(text)
 
-        if not text.strip():
-            return ""
+        # Additional OCR error fixes (deterministic patterns only)
+        ocr_fixes = [
+            (r'(?<!\w)1l(?!\w)', 'll'),  # '1l' → 'll' (not in middle of words)
+            (r'(?<!\w)rn(?!\w)', 'm'),   # 'rn' → 'm' (not in middle of words)
+            (r'(?<!\w)O0(?!\w)', '00'),  # 'O0' → '00' (obvious digit confusion)
+        ]
 
-        # Stage 2: LLM-based semantic cleaning
-        prompt = (
-            "Fix this text. Apply only these fixes:\n"
-            "1. Remove 'Prepared by Madison Technology for' lines\n"
-            "2. Fix hyphenated word breaks (e.g., 'informa-\\ntion' → 'information')\n"
-            "3. Fix OCR errors: '1l'→'ll', 'rn'→'m'\n"
-            "4. Rejoin broken sentences from line breaks\n"
-            "CRITICAL: Keep all other text. No explanations. Output only the fixed text.\n\n"
-            f"{text}"
-        )
+        for pattern, replacement in ocr_fixes:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
 
-        for attempt in range(max_retries):
-            try:
-                logger.debug(f"Cleaning text with {self.model} (attempt {attempt + 1}/{max_retries})")
+        # Fix hyphenated word breaks (e.g., "informa-\ntion" → "information")
+        text = re.sub(r'(\w)-\n(\w)', r'\1\2', text)
 
-                response = requests.post(
-                    f"{self.ollama_url}/api/generate",
-                    json={
-                        "model": self.model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "temperature": 0.1
-                    },
-                    timeout=self.timeout
-                )
-
-                if response.status_code == 200:
-                    cleaned_text = response.json().get("response", "").strip()
-
-                    # Post-process: Remove common LLM preambles and explanations
-                    # Remove starting markers (case-insensitive)
-                    start_markers = [
-                        "the revised text:",
-                        "the fixed text:",
-                        "corrected text:",
-                        "here is the corrected",
-                        "here's the corrected",
-                        "corrected:",
-                        "fixed:",
-                        "revised:",
-                    ]
-                    for marker in start_markers:
-                        if cleaned_text.lower().startswith(marker):
-                            cleaned_text = cleaned_text[len(marker):].strip()
-                            break
-
-                    # Remove inline markers if still present
-                    for marker in ["CORRECTED TEXT:", "FIXED TEXT:", "REVISED TEXT:", "Here is the fixed", "Here is the"]:
-                        if marker in cleaned_text:
-                            cleaned_text = cleaned_text.split(marker, 1)[-1].strip()
-
-                    # Remove trailing explanations
-                    for closing in ["No character substitutions", "No changes needed", "following corrections", "STRICT RULES FOLLOWED"]:
-                        if closing in cleaned_text:
-                            cleaned_text = cleaned_text.split(closing)[0].strip()
-
-                    return cleaned_text if cleaned_text else text
-                else:
-                    logger.warning(f"Ollama returned status {response.status_code}: {response.text[:200]}")
-                    if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt
-                        logger.info(f"Retrying in {wait_time} seconds...")
-                        time.sleep(wait_time)
-                    else:
-                        logger.error(f"Failed to clean text after {max_retries} attempts")
-                        return text
-
-            except requests.exceptions.Timeout:
-                logger.warning(f"Timeout cleaning text (attempt {attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                else:
-                    logger.error(f"Text cleaning timed out after {max_retries} attempts")
-                    return text
-            except Exception as e:
-                logger.error(f"Error cleaning text: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                else:
-                    return text
+        # Clean up remaining artifacts
+        text = text.strip()
 
         return text
 
@@ -261,7 +191,7 @@ class TextCleaner:
 
             if pdf_text:
                 logger.debug(f"Cleaning page {page_data['page_num']} PDF text ({len(pdf_text)} chars)")
-                cleaned_pdf_text = self.clean_text_with_llm(pdf_text)
+                cleaned_pdf_text = self.clean_text_programmatically(pdf_text)
                 logger.debug(f"Cleaned to {len(cleaned_pdf_text)} chars")
                 cleaned_page['pdf_text'] = cleaned_pdf_text
             else:
@@ -297,7 +227,7 @@ class TextCleaner:
                 cleaned_img = img_data.copy()
 
                 logger.debug(f"Cleaning image OCR ({len(ocr_text)} chars, confidence: {ocr_confidence})")
-                cleaned_ocr_text = self.clean_text_with_llm(ocr_text)
+                cleaned_ocr_text = self.clean_text_programmatically(ocr_text)
                 logger.debug(f"Cleaned to {len(cleaned_ocr_text)} chars")
                 cleaned_img['ocr_text'] = cleaned_ocr_text
 
@@ -312,9 +242,12 @@ class TextCleaner:
         cleaned_result['pages'] = cleaned_pages
         cleaned_result['metadata']['cleaned_at'] = datetime.now().isoformat()
         cleaned_result['metadata']['cleaning_notes'] = (
-            "Three-filter cleaning: 1) Remove boilerplate-only OCR images (Madison headers, FileCloud footers), "
-            "2) Remove low-confidence OCR (< 0.5), 3) LLM semantic fixing (OCR errors, hyphenation). "
-            "Numbered steps and newlines preserved for procedural structure. "
+            "Programmatic cleaning: "
+            "1) Remove boilerplate patterns (Madison headers, FileCloud footers, copyright notices), "
+            "2) Filter images: remove boilerplate-only OCR, remove low-confidence OCR (< 0.5), remove empty OCR, "
+            "3) Fix common OCR errors (1l→ll, rn→m, hyphenated word breaks), "
+            "4) Normalize whitespace. "
+            "Numbered steps and procedural structure preserved. "
             "OCR text kept separate from PDF text to preserve visual context distinction."
         )
 
