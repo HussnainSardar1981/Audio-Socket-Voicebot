@@ -233,7 +233,8 @@ class TextCleaner:
             cleaned_page = page_data.copy()
 
             # Clean PDF text
-            pdf_text = page_data.get('pdf_text', '').strip()
+            # Note: extraction_pipeline.py creates pages with 'text' key, not 'pdf_text'
+            pdf_text = page_data.get('text', '').strip()
 
             if pdf_text:
                 logger.debug(f"Cleaning page {page_data['page_num']} PDF text ({len(pdf_text)} chars)")
@@ -249,7 +250,7 @@ class TextCleaner:
 
             for img_data in page_data.get('images', []):
                 ocr_text = img_data.get('ocr_text', '').strip()
-                ocr_confidence = img_data.get('ocr_confidence', 1.0)
+                ocr_confidence = img_data.get('confidence', 1.0)
 
                 # FILTER 1: Skip images with boilerplate-only OCR
                 if self.is_boilerplate_ocr(ocr_text):
