@@ -205,7 +205,7 @@ class DocumentChunker:
         Args:
             customer_id: Customer identifier
             doc_name: Document name
-            pages: List of page dicts with 'page_num' and 'pdf_text_clean' keys
+            pages: List of page dicts with 'page_num' and 'pdf_text' keys
             existing_hashes: Set of existing chunk hashes (for deduplication)
 
         Returns:
@@ -294,13 +294,18 @@ class RAGChunker:
         """
         Chunk all documents for a customer
 
+        Directory structure:
+        customers/{customer_id}/{pdf_name}/
+        ├── content.json (extracted, raw)
+        ├── content_cleaned.json (cleaned, ready for chunking)
+        └── images/
+
         Returns:
             {
                 'customer_id': '...',
-                'documents': {
-                    'doc_name': [chunks...]
-                },
+                'documents_processed': N,
                 'total_chunks': N,
+                'chunks': [...],
                 'created_at': '...'
             }
         """
@@ -308,12 +313,12 @@ class RAGChunker:
         print("=" * 70)
 
         # Paths
-        extracted_dir = self.server_root / "customers" / customer_id / "extracted"
-        kb_metadata_path = self.server_root / "customers" / customer_id / "kb_metadata.json"
+        customer_dir = self.server_root / "customers" / customer_id
+        kb_metadata_path = customer_dir / "kb_metadata.json"
 
-        if not extracted_dir.exists():
-            logger.error(f"Extracted directory not found: {extracted_dir}")
-            return {'status': 'error', 'message': 'No extracted directory'}
+        if not customer_dir.exists():
+            logger.error(f"Customer directory not found: {customer_dir}")
+            return {'status': 'error', 'message': 'No customer directory'}
 
         # Load existing chunk hashes for deduplication
         existing_hashes = set()
@@ -323,40 +328,64 @@ class RAGChunker:
                 for file_info in kb_metadata.get('files', {}).values():
                     existing_hashes.update(file_info.get('chunk_hashes', []))
 
-        # Process each document
+        # Process each PDF folder in customer directory
         all_chunks = []
         documents_processed = 0
 
-        for doc_dir in sorted(extracted_dir.iterdir()):
-            if not doc_dir.is_dir():
+        for pdf_dir in sorted(customer_dir.iterdir()):
+            if not pdf_dir.is_dir():
                 continue
 
-            metadata_path = doc_dir / "metadata.json"
-            if not metadata_path.exists():
-                logger.warning(f"No metadata.json in {doc_dir.name}")
+            # Skip metadata files
+            if pdf_dir.name == 'kb_metadata.json':
                 continue
 
-            # Load cleaned metadata
-            with open(metadata_path, 'r', encoding='utf-8') as f:
-                metadata = json.load(f)
+            # Look for content_cleaned.json (cleaned content)
+            cleaned_file = pdf_dir / "content_cleaned.json"
+            if not cleaned_file.exists():
+                logger.debug(f"No content_cleaned.json in {pdf_dir.name}, skipping")
+                continue
 
-            doc_name = metadata.get('doc_name')
-            pages = metadata.get('pages', [])
+            # Load cleaned content
+            try:
+                with open(cleaned_file, 'r', encoding='utf-8') as f:
+                    cleaned_data = json.load(f)
 
-            print(f"  Chunking {doc_name}...")
+                doc_name = pdf_dir.name
+                pages = cleaned_data.get('pages', [])
 
-            # Chunk document
-            doc_chunks = self.chunker.chunk_document(
-                customer_id=customer_id,
-                doc_name=doc_name,
-                pages=pages,
-                existing_hashes=existing_hashes
-            )
+                print(f"  Chunking {doc_name}...")
+                logger.info(f"Chunking document: {doc_name}")
 
-            print(f"    [OK] Created {len(doc_chunks)} chunks")
+                # Chunk document
+                doc_chunks = self.chunker.chunk_document(
+                    customer_id=customer_id,
+                    doc_name=doc_name,
+                    pages=pages,
+                    existing_hashes=existing_hashes
+                )
 
-            all_chunks.extend(doc_chunks)
-            documents_processed += 1
+                print(f"    [OK] Created {len(doc_chunks)} chunks")
+                logger.info(f"Created {len(doc_chunks)} chunks for {doc_name}")
+
+                # Save chunked result to content_chunked.json
+                chunked_output = pdf_dir / "content_chunked.json"
+                chunked_data = {
+                    'metadata': cleaned_data.get('metadata', {}),
+                    'chunks': doc_chunks,
+                    'chunked_at': datetime.now().isoformat()
+                }
+
+                with open(chunked_output, 'w', encoding='utf-8') as f:
+                    json.dump(chunked_data, f, indent=2, ensure_ascii=False)
+
+                all_chunks.extend(doc_chunks)
+                documents_processed += 1
+
+            except Exception as e:
+                logger.error(f"Failed to chunk {pdf_dir.name}: {e}")
+                print(f"    [ERROR] {e}")
+                continue
 
         # Update kb_metadata.json with chunk hashes
         if kb_metadata_path.exists():
@@ -378,11 +407,16 @@ class RAGChunker:
         with open(kb_metadata_path, 'w', encoding='utf-8') as f:
             json.dump(kb_metadata, f, indent=2, ensure_ascii=False)
 
+        logger.info(f"Updated kb_metadata.json for {customer_id}")
+
         print("\n" + "=" * 70)
         print(f"[SUMMARY] {customer_id}")
         print(f"  Documents processed: {documents_processed}")
         print(f"  Total chunks created: {len(all_chunks)}")
-        print(f"  Avg chunk size: {sum(c['metadata']['token_count'] for c in all_chunks) // max(len(all_chunks), 1)} tokens")
+        if all_chunks:
+            token_counts = [c['metadata']['token_count'] for c in all_chunks]
+            print(f"  Avg chunk size: {sum(token_counts) // len(token_counts)} tokens")
+            print(f"  Token range: {min(token_counts)}-{max(token_counts)}")
 
         return {
             'customer_id': customer_id,
