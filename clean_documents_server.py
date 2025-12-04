@@ -54,14 +54,13 @@ def rigorous_pre_cleanup(text: str) -> str:
     # IMPORTANT: These patterns are carefully crafted to NOT remove solution content
     # especially numbered steps (1., 2., 3., etc.) that are part of instructions
     boilerplate_patterns = [
+        # Document prep lines - match "Prepared by/By Madison Technology for {customer}"
+        # Matches line breaks after the removal to clean up orphaned text
+        r'Prepared\s+(by|By)\s+Madison\s+Technology\s+for\s+[^\n]+\n*',
         # Madison IT company header/footer (completely ignore this)
         r'MADISON\s+TECHNOLO[GC].*?Managed Hosting.*?Services',
         # MTI Support Help Desk contact info (completely ignore)
         r'MTI\s+Support\s+Help\s+Desk\s+T:\s*\+1\s*\(\s*212\s*\)\s*400-7550.*?www\.madisonti\.com',
-        # Document prep line - flexible to match ANY customer name (completely ignore)
-        r'Prepared\s+by\s+Madison\s+Technology\s+for\s+\w+',
-        # Alternative format: "Prepared By Madison Technology for {anything}"
-        r'Prepared\s+By\s+Madison\s+Technology\s+for\s+.+',
         # Madison Technology How-To header (completely ignore)
         r'Madison\s+Technology\s*\n\s*.*?How\s+To\s+Use.*?Rev\s+1a',
         # Page numbers (remove)
@@ -77,6 +76,10 @@ def rigorous_pre_cleanup(text: str) -> str:
     # Remove boilerplate patterns
     for pattern in boilerplate_patterns:
         text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
+
+    # After removing boilerplate, clean up any orphaned single words followed by newlines
+    # (handles cases like "Dean\n\nGetting Started" where only part of line was removed)
+    text = re.sub(r'^\w+\s*\n+', '', text, flags=re.MULTILINE)
 
     # Normalize excessive whitespace and indentation
     # Replace 2+ spaces/tabs with single space
