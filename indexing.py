@@ -131,6 +131,8 @@ class ChromaDBIndexer:
 
         for i, chunk in enumerate(chunks):
             chunk_id = chunk.get('metadata', {}).get('chunk_id', f"chunk_{i}")
+            # CRITICAL: Convert chunk_id to string - ChromaDB requires string IDs
+            chunk_id = str(chunk_id)
 
             # Extract embedding (should be 768 dims from BGE model)
             embedding = chunk.get('embedding', [])
