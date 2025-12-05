@@ -316,10 +316,9 @@ class CleaningPipeline:
     def clean_customer(self, customer_id: str) -> Dict:
         """Clean all extracted PDFs for one customer"""
         customer_dir = self.server_root / "customers" / customer_id
-        extracted_dir = customer_dir / customer_id
 
-        if not extracted_dir.exists():
-            logger.warning(f"No extracted documents folder for {customer_id}")
+        if not customer_dir.exists():
+            logger.warning(f"No customer folder for {customer_id}")
             return {
                 'customer_id': customer_id,
                 'status': 'no_documents',
@@ -328,7 +327,7 @@ class CleaningPipeline:
                 'failed': 0
             }
 
-        extracted_files = list(extracted_dir.glob("*/content.json"))
+        extracted_files = list(customer_dir.glob("*/content.json"))
 
         cleaned_count = 0
         failed_count = 0
@@ -387,8 +386,7 @@ class CleaningPipeline:
         all_customers = []
         for customer_folder in sorted(customers_dir.glob("*")):
             if customer_folder.is_dir():
-                extracted_dir = customer_folder / customer_folder.name
-                if extracted_dir.exists() and any(extracted_dir.glob("*/content.json")):
+                if any(customer_folder.glob("*/content.json")):
                     all_customers.append(customer_folder.name)
 
         print(f"\n[DISCOVER] Found {len(all_customers)} customers with extracted documents")
