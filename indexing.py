@@ -445,11 +445,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python chromadb_indexer.py                              # Index all customers
-  python chromadb_indexer.py --file /path/to/content_embedded.json  # Index single file
-  python chromadb_indexer.py --query "What is 3CX?"       # Query a collection
+  python indexing.py --all                                # Index all customers
+  python indexing.py --customer stuart_dean               # Index single customer
+  python indexing.py --file /path/to/content_embedded.json  # Index single file
+  python indexing.py --query "What is 3CX?" --collection stuart_dean  # Query collection
         """
     )
+    parser.add_argument('--all', action='store_true', help='Index all customers')
+    parser.add_argument('--customer', type=str, help='Index single customer')
     parser.add_argument('--file', type=Path, help='Index single content_embedded.json file')
     parser.add_argument('--query', type=str, help='Query text for semantic search')
     parser.add_argument('--collection', type=str, help='Collection name for query')
@@ -491,7 +494,26 @@ Examples:
             result = index_single_file(indexer, args.file, customer_id)
             return 0 if result['status'] in ['success', 'no_chunks'] else 1
 
-        # Otherwise index all customers
+        # If --customer provided, index single customer
+        if args.customer:
+            customers_dir = server_root / "customers" / args.customer
+            if not customers_dir.exists():
+                print(f"[ERROR] Customer directory not found: {customers_dir}")
+                return 1
+
+            # Find all content_embedded.json files for this customer
+            embedded_files = list(customers_dir.glob("*/content_embedded.json"))
+            if not embedded_files:
+                print(f"[WARN] No embedded files found for customer: {args.customer}")
+                return 0
+
+            print(f"\n[CUSTOMER] Indexing {len(embedded_files)} documents for {args.customer}")
+            for embedded_file in embedded_files:
+                index_single_file(indexer, embedded_file, args.customer)
+
+            return 0
+
+        # Otherwise index all customers (--all or no arguments)
         results = index_all_customers(indexer, server_root)
         success = all(r['status'] in ['success', 'no_chunks'] for r in results.values())
 
