@@ -330,13 +330,19 @@ class RAGEmbedder:
         for customer_id in all_customers:
             try:
                 customer_dir = customers_dir / customer_id
-                extracted_dir = customer_dir / customer_id
 
-                # Look for chunked files
-                chunked_files = list(extracted_dir.glob("*/content_chunked.json")) if extracted_dir.exists() else []
+                # Look for content_cleaned.json files (cleaned content from cleaner stage)
+                # Priority 1: content_chunked.json (if chunking stage exists)
+                # Priority 2: content_cleaned.json (from cleaner stage)
+                # Fallback: content.json (from extraction stage)
+                cleaned_files = list(customer_dir.glob("*/content_cleaned.json"))
+                chunked_files = list(customer_dir.glob("*/content_chunked.json"))
 
-                if not chunked_files:
-                    print(f"\n[SKIP] {customer_id}: No chunked documents found")
+                # Use chunked if available, otherwise use cleaned
+                files_to_process = chunked_files if chunked_files else cleaned_files
+
+                if not files_to_process:
+                    print(f"\n[SKIP] {customer_id}: No cleaned/chunked documents found")
                     results[customer_id] = {
                         'customer_id': customer_id,
                         'status': 'no_chunked_documents',
@@ -347,7 +353,7 @@ class RAGEmbedder:
                 print(f"\n[PROCESS] {customer_id}")
                 customer_chunks_embedded = 0
 
-                for chunked_file in chunked_files:
+                for chunked_file in files_to_process:
                     with open(chunked_file, 'r', encoding='utf-8') as f:
                         chunked_data = json.load(f)
 
@@ -425,10 +431,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python embeddings.py                                    # Embed all customers
-  python embeddings.py --file /path/to/content_chunked.json  # Embed single file
+  python embeddings.py --all                                    # Embed all customers
+  python embeddings.py --customer stuart_dean                   # Embed single customer
+  python embeddings.py --file /path/to/content_chunked.json     # Embed single file
         """
     )
+    parser.add_argument('--all', action='store_true', help='Embed all customers')
+    parser.add_argument('--customer', type=str, help='Embed single customer')
     parser.add_argument('--file', type=Path, help='Embed single content_chunked.json file')
     args = parser.parse_args()
 
@@ -481,11 +490,21 @@ Examples:
                 print(f"[ERROR] {e}")
                 return 1
 
-        else:
+        elif args.customer:
+            # Embed single customer
+            results = embedder.embed_all_customers(customer_filter=[args.customer])
+            success = all(r['status'] in ['success', 'no_chunked_documents'] for r in results.values())
+            return 0 if success else 1
+
+        elif args.all:
             # Embed all customers
             results = embedder.embed_all_customers()
+            success = all(r['status'] in ['success', 'no_chunked_documents'] for r in results.values())
+            return 0 if success else 1
 
-            # Return success if all customers processed
+        else:
+            # Default: embed all customers if no arguments provided
+            results = embedder.embed_all_customers()
             success = all(r['status'] in ['success', 'no_chunked_documents'] for r in results.values())
             return 0 if success else 1
 
