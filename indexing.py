@@ -1,0 +1,425 @@
+"""
+ChromaDB Indexing for RAG Pipeline
+Indexes embeddings into ChromaDB for fast semantic search
+"""
+
+import json
+import sys
+import logging
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Optional
+import os
+
+try:
+    import chromadb
+    from chromadb.config import Settings
+    CHROMADB_AVAILABLE = True
+except ImportError:
+    CHROMADB_AVAILABLE = False
+    print("[WARN] chromadb not installed")
+    print("       Install with: pip install chromadb")
+
+try:
+    from dotenv import load_dotenv
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - CHROMADB - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class ChromaDBIndexer:
+    """Index embeddings into ChromaDB for semantic search"""
+
+    def __init__(self, db_path: str = "./chroma_db"):
+        """
+        Initialize ChromaDB client
+
+        Args:
+            db_path: Path to ChromaDB persistent storage
+        """
+        if not CHROMADB_AVAILABLE:
+            raise ImportError("chromadb not installed. Install with: pip install chromadb")
+
+        self.db_path = Path(db_path)
+        self.db_path.mkdir(parents=True, exist_ok=True)
+
+        # Initialize ChromaDB with persistent storage
+        settings = Settings(
+            chroma_db_impl="duckdb+parquet",
+            persist_directory=str(self.db_path),
+            anonymized_telemetry=False
+        )
+        self.client = chromadb.Client(settings)
+
+        print(f"[INIT] ChromaDB initialized at: {self.db_path}")
+        logger.info(f"ChromaDB initialized at {self.db_path}")
+
+    def create_or_get_collection(self, collection_name: str) -> any:
+        """
+        Create or get a ChromaDB collection
+
+        Args:
+            collection_name: Name of collection (customer_id)
+
+        Returns:
+            ChromaDB collection object
+        """
+        try:
+            # Try to get existing collection
+            collection = self.client.get_collection(name=collection_name)
+            print(f"[OK] Using existing collection: {collection_name}")
+            logger.info(f"Using existing collection: {collection_name}")
+        except:
+            # Create new collection
+            collection = self.client.create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"}  # Use cosine similarity
+            )
+            print(f"[CREATE] New collection: {collection_name}")
+            logger.info(f"Created collection: {collection_name}")
+
+        return collection
+
+    def index_chunks(
+        self,
+        collection,
+        chunks: List[Dict],
+        customer_id: str
+    ) -> Dict:
+        """
+        Add embedded chunks to ChromaDB collection
+
+        Args:
+            collection: ChromaDB collection
+            chunks: List of chunks with embeddings
+            customer_id: Customer identifier
+
+        Returns:
+            Indexing result summary
+        """
+        if not chunks:
+            return {'status': 'no_chunks', 'indexed': 0}
+
+        print(f"\n[INDEX] Adding {len(chunks)} chunks to collection...")
+
+        # Prepare data for ChromaDB
+        ids = []
+        embeddings = []
+        documents = []
+        metadatas = []
+
+        for i, chunk in enumerate(chunks):
+            chunk_id = chunk.get('metadata', {}).get('chunk_id', f"chunk_{i}")
+
+            # Extract embedding (should be 768 dims from BGE model)
+            embedding = chunk.get('embedding', [])
+            if not embedding:
+                logger.warning(f"No embedding found for chunk {chunk_id}")
+                continue
+
+            # Document text for retrieval
+            text = chunk.get('text', '')[:5000]  # Truncate very long texts
+
+            # Metadata for filtering
+            metadata = {
+                'customer_id': customer_id,
+                'doc_name': chunk.get('metadata', {}).get('doc_name', 'unknown'),
+                'page_num': str(chunk.get('metadata', {}).get('page_num', 0)),
+                'chunk_id': chunk_id,
+                'token_count': str(chunk.get('metadata', {}).get('token_count', 0)),
+            }
+
+            ids.append(chunk_id)
+            embeddings.append(embedding)
+            documents.append(text)
+            metadatas.append(metadata)
+
+        # Add to ChromaDB (batches automatically)
+        try:
+            collection.add(
+                ids=ids,
+                embeddings=embeddings,
+                documents=documents,
+                metadatas=metadatas
+            )
+            print(f"[OK] Indexed {len(ids)} chunks")
+            logger.info(f"Successfully indexed {len(ids)} chunks")
+
+            return {
+                'status': 'success',
+                'indexed': len(ids),
+                'collection_name': collection.name,
+                'total_in_collection': collection.count()
+            }
+
+        except Exception as e:
+            logger.error(f"Error indexing chunks: {e}")
+            print(f"[ERROR] {e}")
+            return {'status': 'error', 'indexed': 0, 'error': str(e)}
+
+    def query_collection(
+        self,
+        collection,
+        query_text: str,
+        n_results: int = 5
+    ) -> List[Dict]:
+        """
+        Query the collection with semantic search
+
+        Args:
+            collection: ChromaDB collection
+            query_text: Query text
+            n_results: Number of results to return
+
+        Returns:
+            List of search results
+        """
+        try:
+            results = collection.query(
+                query_texts=[query_text],
+                n_results=n_results
+            )
+
+            # Format results
+            formatted_results = []
+            if results and results['ids'] and len(results['ids']) > 0:
+                for i, chunk_id in enumerate(results['ids'][0]):
+                    formatted_results.append({
+                        'chunk_id': chunk_id,
+                        'distance': results['distances'][0][i],
+                        'text': results['documents'][0][i] if results['documents'] else '',
+                        'metadata': results['metadatas'][0][i] if results['metadatas'] else {}
+                    })
+
+            return formatted_results
+
+        except Exception as e:
+            logger.error(f"Error querying collection: {e}")
+            print(f"[ERROR] {e}")
+            return []
+
+    def get_collection_stats(self, collection) -> Dict:
+        """Get statistics about a collection"""
+        try:
+            count = collection.count()
+            return {
+                'name': collection.name,
+                'total_chunks': count,
+                'status': 'ok'
+            }
+        except Exception as e:
+            logger.error(f"Error getting stats: {e}")
+            return {'status': 'error', 'error': str(e)}
+
+
+def index_single_file(indexer, embedded_file: Path, customer_id: str) -> Dict:
+    """
+    Index a single embedded file
+
+    Args:
+        indexer: ChromaDBIndexer instance
+        embedded_file: Path to content_embedded.json
+        customer_id: Customer identifier
+
+    Returns:
+        Result dict
+    """
+    if not embedded_file.exists():
+        print(f"[ERROR] File not found: {embedded_file}")
+        return {'status': 'error', 'error': 'File not found'}
+
+    print(f"\n[SINGLE FILE] Indexing: {embedded_file}")
+    print("=" * 70)
+
+    try:
+        # Load embedded data
+        with open(embedded_file, 'r', encoding='utf-8') as f:
+            embedded_data = json.load(f)
+
+        chunks = embedded_data.get('chunks', [])
+        if not chunks:
+            print("[WARN] No chunks found in file")
+            return {'status': 'no_chunks', 'indexed': 0}
+
+        # Get or create collection
+        collection = indexer.create_or_get_collection(customer_id)
+
+        # Index chunks
+        result = indexer.index_chunks(collection, chunks, customer_id)
+
+        if result['status'] == 'success':
+            stats = indexer.get_collection_stats(collection)
+            print(f"\n[SUMMARY]")
+            print(f"  Customer: {customer_id}")
+            print(f"  Chunks indexed: {result['indexed']}")
+            print(f"  Total in collection: {stats['total_chunks']}")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Failed to index file: {e}", exc_info=True)
+        print(f"[ERROR] {e}")
+        return {'status': 'error', 'error': str(e)}
+
+
+def index_all_customers(indexer, server_root: Path) -> Dict:
+    """
+    Index all customers' embedded documents
+
+    Args:
+        indexer: ChromaDBIndexer instance
+        server_root: Path to server root
+
+    Returns:
+        Summary of indexing results
+    """
+    print("\n" + "=" * 70)
+    print("CHROMADB INDEXING PIPELINE")
+    print("=" * 70)
+
+    customers_dir = server_root / "customers"
+
+    if not customers_dir.exists():
+        logger.error(f"Customers directory not found: {customers_dir}")
+        print(f"[ERROR] {customers_dir} not found")
+        return {}
+
+    # Discover all embedded files
+    all_files = list(customers_dir.glob("*/*/content_embedded.json"))
+
+    if not all_files:
+        print("[WARN] No embedded files found")
+        return {}
+
+    print(f"\n[DISCOVER] Found {len(all_files)} embedded files")
+
+    results = {}
+    total_indexed = 0
+
+    for embedded_file in all_files:
+        # Extract customer_id from path
+        customer_id = embedded_file.parent.parent.name
+
+        try:
+            result = index_single_file(indexer, embedded_file, customer_id)
+            results[customer_id] = result
+
+            if result['status'] == 'success':
+                total_indexed += result['indexed']
+
+        except Exception as e:
+            logger.error(f"Failed to index {customer_id}: {e}")
+            results[customer_id] = {'status': 'error', 'error': str(e)}
+
+    # Print summary
+    print("\n" + "=" * 70)
+    print("INDEXING SUMMARY")
+    print("=" * 70)
+
+    successful = sum(1 for r in results.values() if r['status'] == 'success')
+
+    for customer_id, result in sorted(results.items()):
+        status_icon = "[OK]" if result['status'] == 'success' else "[WARN]"
+        indexed_count = result.get('indexed', 0)
+        print(f"{status_icon} {customer_id:25} {indexed_count} chunks indexed")
+
+    print(f"\nTotal chunks indexed: {total_indexed}")
+    print(f"Successful: {successful}/{len(results)}")
+    print("=" * 70)
+
+    logger.info(f"Indexing complete: {total_indexed} chunks, {successful} successful")
+
+    return results
+
+
+def main():
+    """Main entry point"""
+    if DOTENV_AVAILABLE:
+        load_dotenv()
+
+    if not CHROMADB_AVAILABLE:
+        print("[ERROR] chromadb not installed")
+        print("Install with: pip install chromadb")
+        return 1
+
+    # Get server root - on Windows, use current directory customers
+    server_root = os.getenv('SERVER_ROOT', str(Path.cwd()))
+    server_root = Path(server_root)
+
+    # Get ChromaDB path - store in current directory
+    chroma_db_path = os.getenv('CHROMA_DB_PATH', './chroma_db')
+
+    # Parse arguments
+    import argparse
+    parser = argparse.ArgumentParser(
+        description='Index embeddings into ChromaDB',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python chromadb_indexer.py                              # Index all customers
+  python chromadb_indexer.py --file /path/to/content_embedded.json  # Index single file
+  python chromadb_indexer.py --query "What is 3CX?"       # Query a collection
+        """
+    )
+    parser.add_argument('--file', type=Path, help='Index single content_embedded.json file')
+    parser.add_argument('--query', type=str, help='Query text for semantic search')
+    parser.add_argument('--collection', type=str, help='Collection name for query')
+    parser.add_argument('--db-path', type=str, default=chroma_db_path, help='ChromaDB path')
+
+    args = parser.parse_args()
+
+    try:
+        # Initialize indexer
+        indexer = ChromaDBIndexer(args.db_path)
+
+        # If --query provided, just query
+        if args.query:
+            if not args.collection:
+                print("[ERROR] --collection required for queries")
+                return 1
+
+            collection = indexer.create_or_get_collection(args.collection)
+            results = indexer.query_collection(collection, args.query, n_results=5)
+
+            print(f"\n[QUERY] '{args.query}'")
+            print("=" * 70)
+            print(f"[RESULTS] Found {len(results)} matches\n")
+
+            for i, result in enumerate(results, 1):
+                distance = result['distance']
+                relevance = max(0, 100 - (distance * 100))  # Convert to relevance score
+                print(f"Match {i} (Relevance: {relevance:.1f}%)")
+                print(f"  Chunk: {result['metadata'].get('chunk_id', 'unknown')}")
+                print(f"  Page: {result['metadata'].get('page_num', 'unknown')}")
+                print(f"  Text: {result['text'][:200]}...")
+                print()
+
+            return 0
+
+        # If --file provided, index single file
+        if args.file:
+            customer_id = args.file.parent.parent.name
+            result = index_single_file(indexer, args.file, customer_id)
+            return 0 if result['status'] in ['success', 'no_chunks'] else 1
+
+        # Otherwise index all customers
+        results = index_all_customers(indexer, server_root)
+        success = all(r['status'] in ['success', 'no_chunks'] for r in results.values())
+
+        return 0 if success else 1
+
+    except Exception as e:
+        logger.error(f"Indexing pipeline failed: {e}", exc_info=True)
+        print(f"[ERROR] {e}")
+        return 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
