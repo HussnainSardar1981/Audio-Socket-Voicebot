@@ -587,9 +587,10 @@ Examples:
 
         results = chunker.chunk_all_customers(customer_ids=customer_ids)
 
-        # Summary
-        total_chunks = sum(r.get('total_chunks', 0) for r in results.values())
-        return 0 if total_chunks > 0 else 1
+        # Summary - return success if we processed any customers
+        # (Skipping existing chunks is expected behavior, not a failure)
+        success = len(results) > 0
+        return 0 if success else 1
 
     except Exception as e:
         logger.error(f"Chunking failed: {e}", exc_info=True)
