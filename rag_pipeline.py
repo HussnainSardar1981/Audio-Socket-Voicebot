@@ -1,6 +1,6 @@
 """
 Master RAG Pipeline Orchestrator
-Runs all stages: Download -> Extract -> Clean -> Embed -> Index
+Runs all stages: Download -> Extract -> Clean -> Chunk -> Embed -> Index
 For one customer, all customers, or a single file
 
 CHANGE DETECTION & SKIP LOGIC (Built-in):
@@ -23,12 +23,17 @@ Each stage has intelligent change detection to avoid re-processing:
    - Skips unchanged documents
    - Only cleans new or modified documents
 
-4. EMBED Stage:
-   - Checks if chunks were already embedded
+4. CHUNK Stage:
+   - Converts cleaned content into optimal-sized chunks
+   - Skips if content_chunked.json already exists
+   - Creates chunks with proper boundaries and metadata
+
+5. EMBED Stage:
+   - Reads chunked content from Stage 4
    - Skips duplicate chunks
    - Only embeds new chunks
 
-5. INDEX Stage:
+6. INDEX Stage:
    - Uses skip_duplicates=True by default
    - Skips chunks already in ChromaDB
    - Only indexes new chunks
@@ -38,6 +43,7 @@ RESULT: When you run the pipeline again, it will:
   - Download only new/modified PDFs
   - Extract only new/modified PDFs
   - Clean only new documents
+  - Chunk only new documents
   - Embed only new chunks
   - Index only new chunks
 
@@ -64,11 +70,12 @@ SCRIPTS = {
     'download': SCRIPT_DIR / 'downloader.py',
     'extract': SCRIPT_DIR / 'extraction.py',
     'clean': SCRIPT_DIR / 'cleaner.py',
+    'chunk': SCRIPT_DIR / 'chunker.py',
     'embed': SCRIPT_DIR / 'embeddings.py',
     'index': SCRIPT_DIR / 'indexing.py',
 }
 
-STAGES = ['download', 'extract', 'clean', 'embed', 'index']
+STAGES = ['download', 'extract', 'clean', 'chunk', 'embed', 'index']
 
 
 class RAGPipeline:
@@ -116,6 +123,10 @@ class RAGPipeline:
             print(f"      - Uses ETag to detect modified files")
         elif stage == 'extract':
             print(f"      - Tracks extraction_metadata.json to skip processed files")
+        elif stage == 'clean':
+            print(f"      - Skips if content_cleaned.json already exists")
+        elif stage == 'chunk':
+            print(f"      - Skips if content_chunked.json already exists")
         elif stage in ('embed', 'index'):
             print(f"      - Skips already processed chunks")
         print(f"{'='*70}\n")
@@ -274,11 +285,11 @@ Examples:
   # Run full pipeline for a single file
   python rag_pipeline.py --file customers/stuart_dean/Documents/doc.pdf
 
-  # Skip download/extract stages, only clean/embed/index
+  # Skip download/extract stages, only clean/chunk/embed/index
   python rag_pipeline.py --all --skip download extract
 
-  # Run only embedding and indexing stages
-  python rag_pipeline.py --all --only embed index
+  # Run only chunk/embed/index stages
+  python rag_pipeline.py --all --only chunk embed index
 
   # Run full pipeline for specific file with custom customer ID
   python rag_pipeline.py --file path/to/file.pdf --customer-id my_customer
@@ -287,8 +298,9 @@ Pipeline Stages (in order):
   1. download  - Download PDFs from SharePoint
   2. extract   - Extract text and images from PDFs
   3. clean     - Clean and fix extracted text
-  4. embed     - Generate embeddings for chunks
-  5. index     - Index embeddings into ChromaDB
+  4. chunk     - Split cleaned content into optimal chunks
+  5. embed     - Generate embeddings for chunks
+  6. index     - Index embeddings into ChromaDB
         """
     )
 
