@@ -82,6 +82,35 @@ class LLMConfig:
     TIMEOUT = 30
 
 
+class RAGConfig:
+    """RAG (Retrieval Augmented Generation) configuration"""
+    # Enable/disable RAG enhancement
+    ENABLED = True
+
+    # Server root path - where customers/ folder is located
+    # ChromaDB database is stored DIRECTLY in customers/{customer_id}/ as chroma.sqlite3
+    # NOT in a separate chroma_db/ folder
+    SERVER_ROOT = "/home/aiadmin/netovo_voicebot/kokora/audiosocket"
+
+    # Customer ID for knowledge base lookup (will be set dynamically per call)
+    # Set to None to disable RAG, or set to specific customer ID
+    CUSTOMER_ID = None
+
+    # Number of relevant chunks to retrieve
+    N_RESULTS = 3
+
+    # Minimum relevance score (0-1) to include in context
+    # Higher = more selective, only very relevant chunks
+    # Lower = more inclusive, even loosely relevant chunks
+    MIN_RELEVANCE = 0.5
+
+    # Include sources in response (for debugging/transparency)
+    INCLUDE_SOURCES = True
+
+    # Maximum context length to append to LLM prompt (characters)
+    MAX_CONTEXT_LENGTH = 2000
+
+
 class ZabbixConfig:
     """Zabbix alert integration configuration"""
     # Alert server endpoint
