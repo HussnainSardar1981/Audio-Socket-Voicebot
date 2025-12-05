@@ -22,8 +22,6 @@ from config_audiosocket import (
     AudioSocketConfig, AudioConfig, ConversationState,
     TurnTakingConfig, LLMConfig, ZabbixConfig
 )
-import requests
-import time
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -70,7 +68,9 @@ class AudioSocketVoicebot:
             shared_pipeline=SharedModels.kokoro_pipeline,
             shared_device=SharedModels.kokoro_device
         )
-        self.llm = OllamaClient()
+        # Initialize LLM client with optional customer_id for RAG
+        # Set customer_id to enable RAG knowledge base retrieval
+        self.llm = OllamaClient(customer_id=None)  # Set to customer ID like "skiface" for RAG
 
         # Audio buffers
         self.user_speech_buffer = bytearray()  # 8kHz buffer for user speech
@@ -222,13 +222,21 @@ class AudioSocketVoicebot:
                 return
 
             logger.info(f"User said: {transcript}")
-
             # Generate LLM response
             logger.info("Generating response...")
             response_text = await asyncio.to_thread(
                 self.llm.generate_response,
                 transcript
             )
+
+            # Track assistant response for ticket creation
+            self.conversation_messages.append({
+                'role': 'assistant',
+                'content': response_text
+            })
+
+            # Check for ticket creation markers or time-based trigger
+            await self._check_and_create_ticket(response_text)
 
             # Speak response
             await self._speak(response_text)
