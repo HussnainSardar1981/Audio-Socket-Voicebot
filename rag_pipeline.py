@@ -2,6 +2,46 @@
 Master RAG Pipeline Orchestrator
 Runs all stages: Download -> Extract -> Clean -> Embed -> Index
 For one customer, all customers, or a single file
+
+CHANGE DETECTION & SKIP LOGIC (Built-in):
+==========================================
+
+Each stage has intelligent change detection to avoid re-processing:
+
+1. DOWNLOAD Stage:
+   - Uses ETag (HTTP headers) to detect if files changed on SharePoint
+   - Only downloads if file is NEW or MODIFIED
+   - Stores ETag in metadata for comparison
+
+2. EXTRACT Stage:
+   - Tracks extraction_metadata.json per customer
+   - Skips PDFs that were already extracted
+   - Re-extracts if PDF was modified (detected by ETag)
+
+3. CLEAN Stage:
+   - Checks if document was already cleaned
+   - Skips unchanged documents
+   - Only cleans new or modified documents
+
+4. EMBED Stage:
+   - Checks if chunks were already embedded
+   - Skips duplicate chunks
+   - Only embeds new chunks
+
+5. INDEX Stage:
+   - Uses skip_duplicates=True by default
+   - Skips chunks already in ChromaDB
+   - Only indexes new chunks
+
+RESULT: When you run the pipeline again, it will:
+  - Automatically detect changed files on SharePoint
+  - Download only new/modified PDFs
+  - Extract only new/modified PDFs
+  - Clean only new documents
+  - Embed only new chunks
+  - Index only new chunks
+
+This makes re-running the pipeline FAST and EFFICIENT!
 """
 
 import sys
@@ -70,6 +110,14 @@ class RAGPipeline:
 
         print(f"\n{'='*70}")
         print(f"RUNNING STAGE: {stage.upper()}")
+        print(f"{'='*70}")
+        print(f"Note: Built-in change detection is active")
+        if stage == 'download':
+            print(f"      - Uses ETag to detect modified files")
+        elif stage == 'extract':
+            print(f"      - Tracks extraction_metadata.json to skip processed files")
+        elif stage in ('embed', 'index'):
+            print(f"      - Skips already processed chunks")
         print(f"{'='*70}\n")
 
         try:
