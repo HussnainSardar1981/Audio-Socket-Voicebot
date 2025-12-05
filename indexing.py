@@ -20,6 +20,14 @@ except ImportError:
     print("       Install with: pip install chromadb")
 
 try:
+    from sentence_transformers import SentenceTransformer
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    print("[WARN] sentence-transformers not installed")
+    print("       Install with: pip install sentence-transformers")
+
+try:
     from dotenv import load_dotenv
     DOTENV_AVAILABLE = True
 except ImportError:
@@ -46,8 +54,27 @@ class ChromaDBIndexer:
         if not CHROMADB_AVAILABLE:
             raise ImportError("chromadb not installed. Install with: pip install chromadb")
 
+        if not TRANSFORMERS_AVAILABLE:
+            raise ImportError("sentence-transformers not installed. Install with: pip install sentence-transformers")
+
         self.db_path = Path(db_path)
         self.db_path.mkdir(parents=True, exist_ok=True)
+
+        # Initialize embedder for generating query embeddings (must match indexing model)
+        print(f"[INIT] Loading embedding model: BAAI/bge-base-en-v1.5")
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+
+        try:
+            self.embedder = SentenceTransformer("BAAI/bge-base-en-v1.5", device=device)
+            print(f"[OK] Embedding model loaded on device: {device}")
+            logger.info(f"Embedding model loaded on {device}")
+        except Exception as e:
+            logger.error(f"Failed to load embedding model: {e}")
+            raise RuntimeError(f"Cannot load embedding model: {e}")
 
         # Initialize ChromaDB with persistent storage (new API)
         try:
@@ -105,7 +132,8 @@ class ChromaDBIndexer:
         self,
         collection,
         chunks: List[Dict],
-        customer_id: str
+        customer_id: str,
+        skip_duplicates: bool = True
     ) -> Dict:
         """
         Add embedded chunks to ChromaDB collection
@@ -114,6 +142,7 @@ class ChromaDBIndexer:
             collection: ChromaDB collection
             chunks: List of chunks with embeddings
             customer_id: Customer identifier
+            skip_duplicates: If True, skip chunks that already exist in collection
 
         Returns:
             Indexing result summary
@@ -128,11 +157,28 @@ class ChromaDBIndexer:
         embeddings = []
         documents = []
         metadatas = []
+        skipped = 0
+
+        # Get existing IDs if skipping duplicates
+        existing_ids = set()
+        if skip_duplicates:
+            try:
+                existing = collection.get()
+                if existing and existing['ids']:
+                    existing_ids = set(existing['ids'])
+                    print(f"[INFO] Found {len(existing_ids)} existing chunks in collection")
+            except Exception as e:
+                logger.warning(f"Could not check for duplicates: {e}")
 
         for i, chunk in enumerate(chunks):
             chunk_id = chunk.get('metadata', {}).get('chunk_id', f"chunk_{i}")
             # CRITICAL: Convert chunk_id to string - ChromaDB requires string IDs
             chunk_id = str(chunk_id)
+
+            # Skip if already indexed
+            if skip_duplicates and chunk_id in existing_ids:
+                skipped += 1
+                continue
 
             # Extract embedding (should be 768 dims from BGE model)
             embedding = chunk.get('embedding', [])
@@ -159,18 +205,22 @@ class ChromaDBIndexer:
 
         # Add to ChromaDB (batches automatically)
         try:
-            collection.add(
-                ids=ids,
-                embeddings=embeddings,
-                documents=documents,
-                metadatas=metadatas
-            )
-            print(f"[OK] Indexed {len(ids)} chunks")
-            logger.info(f"Successfully indexed {len(ids)} chunks")
+            if ids:
+                collection.add(
+                    ids=ids,
+                    embeddings=embeddings,
+                    documents=documents,
+                    metadatas=metadatas
+                )
+                print(f"[OK] Indexed {len(ids)} chunks")
+                if skipped > 0:
+                    print(f"[INFO] Skipped {skipped} duplicate chunks")
+                logger.info(f"Successfully indexed {len(ids)} chunks")
 
             return {
                 'status': 'success',
                 'indexed': len(ids),
+                'skipped': skipped,
                 'collection_name': collection.name,
                 'total_in_collection': collection.count()
             }
@@ -198,8 +248,16 @@ class ChromaDBIndexer:
             List of search results
         """
         try:
+            # Generate query embedding using same BGE model used for indexing
+            query_embedding = self.embedder.encode(
+                query_text,
+                convert_to_tensor=False,
+                normalize_embeddings=True
+            ).tolist()
+
+            # Query using pre-generated embeddings (matching indexing model)
             results = collection.query(
-                query_texts=[query_text],
+                query_embeddings=[query_embedding],
                 n_results=n_results
             )
 
