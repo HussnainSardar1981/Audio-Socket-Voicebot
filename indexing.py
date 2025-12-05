@@ -13,7 +13,6 @@ import os
 
 try:
     import chromadb
-    from chromadb.config import Settings
     CHROMADB_AVAILABLE = True
 except ImportError:
     CHROMADB_AVAILABLE = False
@@ -50,13 +49,8 @@ class ChromaDBIndexer:
         self.db_path = Path(db_path)
         self.db_path.mkdir(parents=True, exist_ok=True)
 
-        # Initialize ChromaDB with persistent storage
-        settings = Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory=str(self.db_path),
-            anonymized_telemetry=False
-        )
-        self.client = chromadb.Client(settings)
+        # Initialize ChromaDB with persistent storage (new API)
+        self.client = chromadb.PersistentClient(path=str(self.db_path))
 
         print(f"[INIT] ChromaDB initialized at: {self.db_path}")
         logger.info(f"ChromaDB initialized at {self.db_path}")
