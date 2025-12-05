@@ -50,10 +50,30 @@ class ChromaDBIndexer:
         self.db_path.mkdir(parents=True, exist_ok=True)
 
         # Initialize ChromaDB with persistent storage (new API)
-        self.client = chromadb.PersistentClient(path=str(self.db_path))
+        try:
+            self.client = chromadb.PersistentClient(path=str(self.db_path))
+            print(f"[INIT] ChromaDB initialized at: {self.db_path}")
+            logger.info(f"ChromaDB initialized at {self.db_path}")
+        except Exception as e:
+            logger.error(f"Failed to initialize ChromaDB: {e}")
+            print(f"[ERROR] ChromaDB initialization failed: {e}")
+            print(f"[FIX] Attempting to remove corrupted database and reinitialize...")
 
-        print(f"[INIT] ChromaDB initialized at: {self.db_path}")
-        logger.info(f"ChromaDB initialized at {self.db_path}")
+            # Try to recover by removing corrupted files
+            import shutil
+            try:
+                shutil.rmtree(str(self.db_path))
+                self.db_path.mkdir(parents=True, exist_ok=True)
+                print(f"[CLEANUP] Removed corrupted database at: {self.db_path}")
+                logger.info(f"Removed corrupted database and retrying initialization")
+
+                # Retry initialization
+                self.client = chromadb.PersistentClient(path=str(self.db_path))
+                print(f"[INIT] ChromaDB initialized successfully (after cleanup)")
+                logger.info(f"ChromaDB initialized successfully after cleanup")
+            except Exception as retry_error:
+                logger.error(f"Failed to recover ChromaDB: {retry_error}")
+                raise RuntimeError(f"Cannot initialize ChromaDB even after cleanup: {retry_error}")
 
     def create_or_get_collection(self, collection_name: str) -> any:
         """
@@ -342,6 +362,14 @@ def main():
         print("[ERROR] chromadb not installed")
         print("Install with: pip install chromadb")
         return 1
+
+    # Configure ChromaDB temp directory to avoid /tmp full errors
+    chroma_temp_dir = Path('/home/aiadmin/netovo_voicebot/kokora/audiosocket/chroma_temp')
+    chroma_temp_dir.mkdir(parents=True, exist_ok=True)
+    os.environ['TMPDIR'] = str(chroma_temp_dir)
+    os.environ['TEMP'] = str(chroma_temp_dir)
+    os.environ['TMP'] = str(chroma_temp_dir)
+    print(f"[CONFIG] ChromaDB temp directory: {chroma_temp_dir}")
 
     # Get server root - on Windows, use current directory customers
     server_root = os.getenv('SERVER_ROOT', str(Path.cwd()))
