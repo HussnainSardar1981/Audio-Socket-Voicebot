@@ -6,6 +6,8 @@ Combines AudioSocket server with VAD, ASR, Kokoro TTS, and Ollama LLM.
 import asyncio
 import logging
 import numpy as np
+import time
+import requests
 from pathlib import Path
 from typing import Optional
 
@@ -71,6 +73,9 @@ class AudioSocketVoicebot:
         # Initialize LLM client with optional customer_id for RAG
         # Set customer_id to enable RAG knowledge base retrieval
         self.llm = OllamaClient(customer_id=None)  # Set to customer ID like "skiface" for RAG
+
+        # Conversation history for ticket creation
+        self.conversation_messages = []
 
         # Audio buffers
         self.user_speech_buffer = bytearray()  # 8kHz buffer for user speech
@@ -222,6 +227,13 @@ class AudioSocketVoicebot:
                 return
 
             logger.info(f"User said: {transcript}")
+
+            # Track user message
+            self.conversation_messages.append({
+                'role': 'user',
+                'content': transcript
+            })
+
             # Generate LLM response
             logger.info("Generating response...")
             response_text = await asyncio.to_thread(
@@ -247,6 +259,12 @@ class AudioSocketVoicebot:
         except Exception as e:
             logger.error(f"Error processing speech: {e}", exc_info=True)
             self.state = ConversationState.IDLE
+
+    async def _check_and_create_ticket(self, response_text: str):
+        """Check if ticket should be created based on response"""
+        # Placeholder for ticket creation logic
+        # This can be extended later to create support tickets
+        pass
 
     async def _speak(self, text: str, voice_type: str = "default"):
         """
@@ -498,7 +516,7 @@ async def main():
                     uuid_str = connection.session_uuid.decode('utf-8', errors='ignore')
                     if uuid_str.startswith(ZabbixConfig.ALERT_CALL_ID_PREFIX):
                         call_id = uuid_str
-                        logger.info(f"🚨 ZABBIX ALERT CALL detected: {call_id}")
+                        logger.info(f"ZABBIX ALERT CALL detected: {call_id}")
                 except:
                     pass
 
