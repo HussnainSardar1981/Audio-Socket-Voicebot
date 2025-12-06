@@ -83,50 +83,77 @@ class LLMConfig:
 
 
 class RAGConfig:
-    """RAG (Retrieval Augmented Generation) configuration"""
-    # Enable/disable RAG enhancement
-    ENABLED = True
+    """RAG (Retrieval-Augmented Generation) Configuration"""
 
-    # Server root path - where customers/ folder is located
-    # ChromaDB database is stored DIRECTLY in customers/{customer_id}/ as chroma.sqlite3
-    # NOT in a separate chroma_db/ folder
-    SERVER_ROOT = "/home/aiadmin/netovo_voicebot/kokora/audiosocket"
+    # ===== Enable/Disable RAG =====
+    ENABLED = True  # Set to False to disable RAG globally
 
-    # Customer ID for knowledge base lookup (will be set dynamically per call)
-    # Set to None to disable RAG, or set to specific customer ID
-    CUSTOMER_ID = None
+    # ===== ChromaDB Path Configuration =====
+    # IMPORTANT: The shared ChromaDB is in a folder LITERALLY named "{customer_id}"
+    # This is NOT a placeholder - it's the actual folder name!
+    # On server: customers/{customer_id}/kb.db/chroma.sqlite3
+    # Inside this database, each customer has their own collection
 
-    # Number of relevant chunks to retrieve
-    N_RESULTS = 3
+    # Path to shared ChromaDB (the folder is literally called "{customer_id}")
+    # On server: "./customers/{customer_id}/kb.db"
+    # On Windows: "G:/Voicebot/customers/{customer_id}/kb.db"
+    CHROMA_DB_PATH = "./customers/{customer_id}/kb.db"
 
-    # Minimum relevance score (0-1) to include in context
-    # Higher = more selective, only very relevant chunks
-    # Lower = more inclusive, even loosely relevant chunks
-    MIN_RELEVANCE = 0.5
+    # NOTE: "skisafe", "stuart_dean", etc. are SEPARATE folders containing
+    # customer PDFs and extracted data, NOT the ChromaDB location!
 
-    # Include sources in response (for debugging/transparency)
-    INCLUDE_SOURCES = True
+    # ===== Embedding Model Configuration =====
+    # CRITICAL: Must match the model used during indexing!
+    EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"  # DO NOT CHANGE unless you re-index
+    EXPECTED_DIMENSIONS = 768  # Embedding dimensions for validation
 
-    # Maximum context length to append to LLM prompt (characters)
-    MAX_CONTEXT_LENGTH = 2000
+    # ===== Retrieval Settings - TUNE THESE =====
+    TOP_K = 3  # Number of document chunks to retrieve
+                # Increase for more context (slower, more tokens)
+                # Decrease for faster responses (less context)
+
+    MIN_SIMILARITY_SCORE = 0.3  # Minimum relevance score (0-1)
+                                 # Increase to filter out irrelevant chunks
+                                 # Decrease to retrieve more candidates
+
+    # ===== Context Formatting - TUNE THESE =====
+    MAX_CONTEXT_LENGTH = 2000  # Maximum characters for retrieved context
+                                # Increase if LLM has larger context window
+                                # Decrease to save tokens
+
+    INCLUDE_SOURCE_METADATA = True  # Include doc name, page numbers in context
+                                     # Useful for debugging, but adds tokens
+
+    # ===== Performance Settings =====
+    LAZY_LOAD = True  # Only initialize ChromaDB when customer_id is provided
+                      # Keeps startup fast for non-RAG calls
+
+    CACHE_EMBEDDINGS = False  # Cache query embeddings (experimental)
+                              # May improve latency for repeated queries
+
+    # ===== Error Handling =====
+    FALLBACK_ON_ERROR = True  # Fall back to LLM-only mode on RAG errors
+                              # Set to False to raise errors (for debugging)
+
+    LOG_RETRIEVAL = True  # Log all retrieval attempts (verbose)
+                          # Useful for debugging, disable in production if logs are too large
 
 
 class ZabbixConfig:
-    """Zabbix alert integration configuration"""
-    # Alert server endpoint
-    ALERT_SERVER_URL = "http://localhost:9001"
+    """Zabbix alert configuration"""
+    # Alert server URL (where alert data is fetched)
+    ALERT_SERVER_URL = "http://localhost:5000"  # Update with actual alert server
 
-    # DTMF detection settings
-    DTMF_SAMPLE_RATE = 8000              # AudioSocket rate (don't change)
-    DTMF_FRAME_DURATION_MS = 20          # Frame duration (don't change)
-    DTMF_WAIT_TIMEOUT = 30               # Seconds to wait for DTMF response
-    DTMF_ENERGY_THRESHOLD = 100.0        # Minimum energy for tone detection
-    DTMF_TONE_THRESHOLD = 0.3            # Relative magnitude threshold
-    DTMF_MIN_DURATION_MS = 40            # Minimum tone duration (40ms = 2 frames)
+    # Alert call identification
+    ALERT_CALL_ID_PREFIX = "zabbix_alert_"  # Prefix for alert call UUIDs
 
-    # Alert call detection
-    # Alert calls are detected via dialplan passing call_id in UUID field
-    ALERT_CALL_ID_PREFIX = "zabbix_alert_"
+    # DTMF configuration for alert acknowledgment
+    DTMF_SAMPLE_RATE = 8000  # Sample rate for DTMF detection
+    DTMF_FRAME_DURATION_MS = 20  # Frame duration in ms
+    DTMF_ENERGY_THRESHOLD = 100  # Energy threshold for DTMF detection
+    DTMF_TONE_THRESHOLD = 0.3  # Tone detection threshold
+    DTMF_MIN_DURATION_MS = 80  # Minimum DTMF tone duration
+    DTMF_WAIT_TIMEOUT = 30  # Seconds to wait for DTMF response
 
 
 class ConversationState(str, Enum):
