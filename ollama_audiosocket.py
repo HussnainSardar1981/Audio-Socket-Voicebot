@@ -6,6 +6,9 @@ Integrates retrieval-augmented generation for customer-specific knowledge
 
 import logging
 import requests
+import json
+import os
+from datetime import datetime
 from typing import Optional
 from config_audiosocket import LLMConfig, RAGConfig
 
@@ -53,15 +56,39 @@ class OllamaClient:
 
         # System prompts
         if self.rag_enabled:
-            self.system_prompt = f"""You are Alexis, a helpful voice assistant for {customer_id}.
+            self.system_prompt = f"""You are Alexis, a professional customer support assistant for {customer_id}.
 
-IMPORTANT INSTRUCTIONS:
-1. Answer questions using information from the customer's documents provided below
-2. Speak naturally as if you have this knowledge yourself
-3. Do NOT mention document names, page numbers, or file paths when speaking
-4. If the documents don't contain the answer, say "I don't have that information in your knowledge base"
-5. Keep responses concise and natural for phone conversation (1-3 sentences)
-6. Do NOT add information from your training data if it conflicts with the documents"""
+CONVERSATION STYLE (CRITICAL):
+- Keep responses SHORT (1-2 sentences, max 40 words)
+- Ask ONE question at a time to keep conversation flowing
+- Speak naturally like a helpful human agent on the phone
+- End your turn with a question when appropriate
+
+ANSWERING FROM KNOWLEDGE BASE:
+- Use ONLY the information from the documents provided below
+- Speak naturally as if you have this knowledge yourself
+- NEVER mention "documents", "knowledge base", "page numbers", or file names
+- If documents don't have the answer, say "I don't have that specific information. Could you clarify what you're looking for?"
+
+GOOD EXAMPLES (Customer Support):
+User: "How do I reset my password?"
+You: "You can reset it by clicking 'Forgot Password' on the login page. Would you like me to walk you through the steps?"
+
+User: "What are your business hours?"
+You: "We're open Monday to Friday, 9 AM to 5 PM. Is there a specific day you'd like to visit?"
+
+User: "My system keeps crashing"
+You: "I can help with that. What error message do you see when it crashes?"
+
+BAD EXAMPLES (Avoid):
+- "According to the documentation on page 5..." (too technical)
+- "Let me tell you all about our products and services and pricing..." (too long)
+- "What's your issue and when did it start and have you tried restarting?" (multiple questions)
+
+WHEN INFORMATION NOT FOUND:
+- Don't make up answers
+- Politely say you don't have that information
+- Ask a clarifying question or offer to help with something else"""
         else:
             self.system_prompt = """You are Alexis, a helpful voice assistant.
 Keep responses concise and natural for spoken conversation.
@@ -164,6 +191,132 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
             else:
                 raise
 
+    def _log_unanswered_question(self, question: str):
+        """
+        Log questions that RAG couldn't answer for knowledge base improvement
+
+        Args:
+            question: User's question that couldn't be answered from RAG
+        """
+        try:
+            # Create directory for unanswered questions
+            unanswered_dir = f"./unanswered_questions/{self.customer_id}"
+            os.makedirs(unanswered_dir, exist_ok=True)
+
+            # Log file path (one file per day)
+            today = datetime.now().strftime("%Y-%m-%d")
+            log_file = f"{unanswered_dir}/{today}.jsonl"
+
+            # Create log entry
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "customer_id": self.customer_id,
+                "question": question,
+                "date": today
+            }
+
+            # Append to JSONL file (one JSON object per line)
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(entry) + '\n')
+
+            logger.info(f"Logged unanswered question for {self.customer_id}: {question}")
+
+        except Exception as e:
+            logger.error(f"Failed to log unanswered question: {e}", exc_info=True)
+
+    def generate_response_streaming(self, user_text: str):
+        """
+        Generate response with streaming (yields sentences as they complete)
+
+        Args:
+            user_text: User's transcribed speech
+
+        Yields:
+            Complete sentences as they are generated
+
+        This allows TTS to start speaking while LLM is still generating,
+        dramatically reducing perceived latency.
+        """
+        try:
+            # Step 1: Retrieve context from RAG (if enabled)
+            rag_context = self._retrieve_context(user_text)
+
+            # Step 2: Build prompt
+            if rag_context:
+                prompt = self._build_rag_prompt(user_text, rag_context)
+                logger.info("Using RAG-augmented prompt (streaming)")
+            else:
+                prompt = self._build_standard_prompt(user_text)
+                logger.info("Using standard prompt (streaming, no RAG context)")
+
+                # Log unanswered question if RAG was enabled but no context found
+                if self.rag_enabled:
+                    self._log_unanswered_question(user_text)
+
+            # Step 3: Call Ollama LLM with STREAMING
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    'model': self.model,
+                    'prompt': prompt,
+                    'stream': True,  # Enable streaming
+                    'options': {
+                        'temperature': 0.7,
+                        'num_predict': 50,
+                        'stop': ['\n\n', 'User:', 'Human:', 'Assistant:']
+                    }
+                },
+                timeout=self.timeout,
+                stream=True  # Enable streaming on requests
+            )
+            response.raise_for_status()
+
+            # Step 4: Stream tokens and yield complete sentences
+            current_sentence = ""
+            full_response = ""
+
+            for line in response.iter_lines():
+                if line:
+                    try:
+                        chunk = json.loads(line)
+                        token = chunk.get('response', '')
+                        current_sentence += token
+                        full_response += token
+
+                        # Check if sentence is complete (ends with . ? ! or newline)
+                        if token in ['.', '?', '!'] or '\n' in token:
+                            sentence = current_sentence.strip()
+                            if sentence:
+                                logger.info(f"Yielding sentence: {sentence[:50]}...")
+                                yield sentence
+                                current_sentence = ""
+
+                        # Check if generation is done
+                        if chunk.get('done', False):
+                            break
+
+                    except json.JSONDecodeError:
+                        continue
+
+            # Yield any remaining text that didn't end with punctuation
+            if current_sentence.strip():
+                logger.info(f"Yielding final text: {current_sentence[:50]}...")
+                yield current_sentence.strip()
+
+            # Step 5: Update conversation history with full response
+            self.conversation_history.append({'role': 'user', 'content': user_text})
+            self.conversation_history.append({'role': 'assistant', 'content': full_response.strip()})
+
+            # Keep only last 10 messages
+            if len(self.conversation_history) > 10:
+                self.conversation_history = self.conversation_history[-10:]
+
+            logger.info(f"Streaming complete: {full_response[:50]}...")
+
+        except Exception as e:
+            logger.error(f"Ollama streaming error: {e}", exc_info=True)
+            yield "I'm sorry, I'm having trouble processing that right now."
+
     def generate_response(self, user_text: str) -> str:
         """
         Generate response from user input with optional RAG
@@ -188,13 +341,22 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
                 prompt = self._build_standard_prompt(user_text)
                 logger.info("Using standard prompt (no RAG context)")
 
-            # Step 3: Call Ollama LLM
+                # Log unanswered question if RAG was enabled but no context found
+                if self.rag_enabled:
+                    self._log_unanswered_question(user_text)
+
+            # Step 3: Call Ollama LLM with token limiting for faster, shorter responses
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json={
                     'model': self.model,
                     'prompt': prompt,
-                    'stream': False
+                    'stream': False,
+                    'options': {
+                        'temperature': 0.7,
+                        'num_predict': 50,  # Limit to ~50 tokens (30-40 words) for natural conversation
+                        'stop': ['\n\n', 'User:', 'Human:', 'Assistant:']  # Stop at natural breaks
+                    }
                 },
                 timeout=self.timeout
             )
