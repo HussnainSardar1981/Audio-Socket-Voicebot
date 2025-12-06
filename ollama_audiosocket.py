@@ -128,7 +128,7 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
 
     def _init_rag_client(self):
         """
-        Lazy initialization of RAG client
+        Get pre-loaded RAG client from SharedModels (FAST - no model loading!)
 
         Returns:
             ChromaRAGClient instance
@@ -138,17 +138,18 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
             RuntimeError: If ChromaDB initialization fails
         """
         try:
-            from chroma_rag_client import get_rag_client
+            # Import SharedModels to get pre-loaded RAG client
+            from model_warmup import SharedModels
 
-            # Get ChromaDB path from config
-            # Note: {customer_id} is a LITERAL folder name, not a placeholder
-            chroma_path = RAGConfig.CHROMA_DB_PATH
+            # Check if RAG client was pre-loaded at startup
+            if SharedModels.rag_client is None:
+                logger.error("RAG client not pre-loaded at startup")
+                if not RAGConfig.FALLBACK_ON_ERROR:
+                    raise RuntimeError("RAG client not available (not pre-loaded)")
+                return None
 
-            # Get or create singleton RAG client
-            rag_client = get_rag_client(
-                db_path=chroma_path,
-                embedding_model=RAGConfig.EMBEDDING_MODEL
-            )
+            # Use the pre-loaded singleton instance (INSTANT - no loading!)
+            rag_client = SharedModels.rag_client
 
             # Verify customer collection exists
             health = rag_client.health_check(self.customer_id)
@@ -158,7 +159,7 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
                 if not RAGConfig.FALLBACK_ON_ERROR:
                     raise RuntimeError(f"RAG health check failed for {self.customer_id}")
 
-            logger.info(f"RAG client initialized: {chroma_path} ({health.get('total_chunks', 0)} chunks)")
+            logger.info(f"Using pre-loaded RAG client ({health.get('total_chunks', 0)} chunks)")
 
             return rag_client
 
