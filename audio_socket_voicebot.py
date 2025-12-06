@@ -555,12 +555,12 @@ async def main():
             # - Database lookup
             # - DID (Direct Inward Dialing) number called
             #
-            # For now, set customer_id to None (RAG disabled) or a specific customer for testing
-            customer_id = None  # Default: RAG disabled (LLM-only mode)
+            # For now, set customer_id to "stuart_dean" for testing
+            customer_id = "stuart_dean"  # RAG enabled for testing
 
-            # Example: Enable RAG for testing with specific customer
-            # customer_id = "stuart_dean"  # Uncomment to test RAG with stuart_dean collection
-            # customer_id = "skisafe"      # Uncomment to test RAG with skisafe collection
+            # Other customer options:
+            # customer_id = "skisafe"      # Test with skisafe collection
+            # customer_id = None           # Disable RAG (LLM-only mode)
 
             # Example: Customer identification from phone number
             # caller_number = connection.peer_address[0] if connection.peer_address else None
@@ -588,9 +588,7 @@ async def main():
                 await voicebot.start_alert_call(call_id)
             else:
                 # Normal customer call
-                # TESTING: Set enable_customer_selection=True to select customer via DTMF
-                enable_testing_mode = True  # Set to False for production
-                await voicebot.start(enable_customer_selection=enable_testing_mode)
+                await voicebot.start()
 
         # Start voicebot handler in background
         asyncio.create_task(handle_voicebot())
