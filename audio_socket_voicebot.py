@@ -245,24 +245,28 @@ class AudioSocketVoicebot:
                 'content': transcript
             })
 
-            # Generate LLM response
-            logger.info("Generating response...")
-            response_text = await asyncio.to_thread(
-                self.llm.generate_response,
-                transcript
-            )
+            # Generate LLM response WITH STREAMING (speaks while generating)
+            logger.info("Generating response (streaming)...")
+            full_response = ""
+
+            # Stream sentences and speak each one immediately
+            def generate_sentences():
+                """Generator wrapper for streaming"""
+                return self.llm.generate_response_streaming(transcript)
+
+            for sentence in await asyncio.to_thread(lambda: list(generate_sentences())):
+                # Speak this sentence immediately while LLM generates next sentence
+                await self._speak(sentence)
+                full_response += " " + sentence
 
             # Track assistant response for ticket creation
             self.conversation_messages.append({
                 'role': 'assistant',
-                'content': response_text
+                'content': full_response.strip()
             })
 
             # Check for ticket creation markers or time-based trigger
-            await self._check_and_create_ticket(response_text)
-
-            # Speak response
-            await self._speak(response_text)
+            await self._check_and_create_ticket(full_response.strip())
 
             # Return to IDLE
             self.state = ConversationState.IDLE
