@@ -56,39 +56,42 @@ class OllamaClient:
 
         # System prompts
         if self.rag_enabled:
-            self.system_prompt = f"""You are Alexis, a professional customer support assistant for {customer_id}.
+            self.system_prompt = f"""You are Alexis, a professional technical support assistant for {customer_id}.
 
-CONVERSATION STYLE (CRITICAL):
-- Keep responses SHORT (1-2 sentences, max 40 words)
-- Ask ONE question at a time to keep conversation flowing
-- Speak naturally like a helpful human agent on the phone
-- End your turn with a question when appropriate
+CRITICAL RULES:
+1. When user mentions an issue or problem, IMMEDIATELY provide the solution from the knowledge base below
+2. DON'T ask clarifying questions if the knowledge base has the answer - just give it
+3. For SHORT solutions: Give complete answer in 1-2 sentences
+4. For LONG procedures: Give first step and ask "shall I continue?"
+5. Speak naturally - never mention "documents" or "knowledge base"
 
-ANSWERING FROM KNOWLEDGE BASE:
-- Use ONLY the information from the documents provided below
-- Speak naturally as if you have this knowledge yourself
-- NEVER mention "documents", "knowledge base", "page numbers", or file names
-- If documents don't have the answer, say "I don't have that specific information. Could you clarify what you're looking for?"
+ANSWERING PROCESS:
+- User mentions issue → You give solution from knowledge base immediately
+- Knowledge base has answer → Give it directly (don't ask questions first)
+- Knowledge base missing info → Then ask ONE clarifying question
+- After giving solution → Ask if they need help with anything else
 
-GOOD EXAMPLES (Customer Support):
-User: "How do I reset my password?"
-You: "You can reset it by clicking 'Forgot Password' on the login page. Would you like me to walk you through the steps?"
+GOOD EXAMPLES:
+User: "My VPN is not connecting"
+You: "Try resetting your VPN client from the settings menu. Does that work?"
 
-User: "What are your business hours?"
-You: "We're open Monday to Friday, 9 AM to 5 PM. Is there a specific day you'd like to visit?"
+User: "How do I configure my phone?" (SHORT procedure)
+You: "Go to Settings, then Network, and enter your extension number. Need help with the next step?"
 
-User: "My system keeps crashing"
-You: "I can help with that. What error message do you see when it crashes?"
+User: "How do I set up email?" (LONG procedure with many steps)
+You: "First, open Outlook and click Add Account. Ready for the next step?"
 
-BAD EXAMPLES (Avoid):
-- "According to the documentation on page 5..." (too technical)
-- "Let me tell you all about our products and services and pricing..." (too long)
-- "What's your issue and when did it start and have you tried restarting?" (multiple questions)
+User: "I'm having login issues"
+You: "Clear your browser cache and try again. Let me know if that doesn't work."
 
-WHEN INFORMATION NOT FOUND:
-- Don't make up answers
-- Politely say you don't have that information
-- Ask a clarifying question or offer to help with something else"""
+BAD EXAMPLES (Don't do this):
+❌ "What specific issue are you experiencing with your VPN?" (don't ask if you have the answer!)
+❌ "Can you tell me more about the problem?" (don't gather info if knowledge base has solution!)
+❌ "Let me check... what error message do you see?" (just give the solution!)
+
+WHEN KNOWLEDGE BASE IS MISSING INFO:
+- Only then ask: "Could you tell me what error message you're seeing?"
+- Be specific about what info you need"""
         else:
             self.system_prompt = """You are Alexis, a helpful voice assistant.
 Keep responses concise and natural for spoken conversation.
@@ -262,7 +265,9 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
                     'stream': True,  # Enable streaming
                     'options': {
                         'temperature': 0.7,
-                        'num_predict': 50,
+                        'num_predict': 150,  # Allow up to 150 tokens for technical procedures
+                                             # ~100-120 words max (3-4 sentences)
+                                             # Prompt controls brevity, not hard limit
                         'stop': ['\n\n', 'User:', 'Human:', 'Assistant:']
                     }
                 },
@@ -317,69 +322,8 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
             logger.error(f"Ollama streaming error: {e}", exc_info=True)
             yield "I'm sorry, I'm having trouble processing that right now."
 
-    def generate_response(self, user_text: str) -> str:
-        """
-        Generate response from user input with optional RAG
-
-        Args:
-            user_text: User's transcribed speech
-
-        Returns:
-            AI response text
-        """
-        try:
-            # Step 1: Retrieve context from RAG (if enabled)
-            rag_context = self._retrieve_context(user_text)
-
-            # Step 2: Build prompt
-            if rag_context:
-                # RAG-augmented prompt
-                prompt = self._build_rag_prompt(user_text, rag_context)
-                logger.info("Using RAG-augmented prompt")
-            else:
-                # Standard prompt without RAG
-                prompt = self._build_standard_prompt(user_text)
-                logger.info("Using standard prompt (no RAG context)")
-
-                # Log unanswered question if RAG was enabled but no context found
-                if self.rag_enabled:
-                    self._log_unanswered_question(user_text)
-
-            # Step 3: Call Ollama LLM with token limiting for faster, shorter responses
-            response = requests.post(
-                f"{self.base_url}/api/generate",
-                json={
-                    'model': self.model,
-                    'prompt': prompt,
-                    'stream': False,
-                    'options': {
-                        'temperature': 0.7,
-                        'num_predict': 50,  # Limit to ~50 tokens (30-40 words) for natural conversation
-                        'stop': ['\n\n', 'User:', 'Human:', 'Assistant:']  # Stop at natural breaks
-                    }
-                },
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-
-            # Step 4: Extract response
-            result = response.json()
-            assistant_text = result['response'].strip()
-
-            # Step 5: Update conversation history
-            self.conversation_history.append({'role': 'user', 'content': user_text})
-            self.conversation_history.append({'role': 'assistant', 'content': assistant_text})
-
-            # Keep only last 10 messages for memory efficiency
-            if len(self.conversation_history) > 10:
-                self.conversation_history = self.conversation_history[-10:]
-
-            logger.info(f"LLM response generated: {assistant_text[:50]}...")
-            return assistant_text
-
-        except Exception as e:
-            logger.error(f"Ollama error: {e}", exc_info=True)
-            return "I'm sorry, I'm having trouble processing that right now."
+    # NOTE: Non-streaming method removed - we ONLY use generate_response_streaming()
+    # for maximum performance (parallel LLM generation + TTS synthesis)
 
     def _build_rag_prompt(self, user_text: str, rag_context: str) -> str:
         """
