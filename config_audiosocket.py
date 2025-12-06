@@ -32,9 +32,19 @@ class AudioConfig:
     # ===== VAD Configuration - TUNE THESE =====
     VAD_SAMPLE_RATE = 8000           # Matches AudioSocket (don't change)
     VAD_FRAME_DURATION_MS = 20       # Frame size in milliseconds (don't change)
-    VAD_AGGRESSIVENESS = 0           # 0-3 (0=least sensitive, 3=most sensitive)
+    VAD_AGGRESSIVENESS = 1           # 0-3 (0=least sensitive, 3=most sensitive)
+                                      # CHANGED from 0 to 1 for better phone line performance
                                       # Increase if VAD misses speech
                                       # Decrease if VAD detects too much noise
+
+    # ===== VAD Hysteresis (prevents flickering) - TUNE THESE =====
+    VAD_SPEECH_START_FRAMES = 8      # Frames of speech needed to start detection (8 = 160ms)
+                                      # Increase to prevent backchanneling ("uh-huh") from triggering
+                                      # Decrease for faster speech detection
+
+    VAD_SPEECH_END_FRAMES = 20       # Frames of silence needed to end detection (20 = 400ms)
+                                      # Increase to allow longer pauses within speech
+                                      # Decrease to detect end of speech faster
 
     # ===== Speech Detection Timeouts - TUNE THESE =====
     SILENCE_FRAMES_TO_END_SPEECH = 25  # 500ms silence to end speech (25 frames @ 20ms)
@@ -71,7 +81,7 @@ class TurnTakingConfig:
                                                   # Decrease for faster interruption response
 
     # ===== VAD Pre-filtering =====
-    VAD_ENERGY_THRESHOLD = 100                   # RMS energy to filter channel noise before VAD
+    VAD_ENERGY_THRESHOLD = 150                   # RMS energy to filter channel noise before VAD
                                                   # INCREASED from 50 to 150 for phone line quality
                                                   # Increase if detecting too much background noise
                                                   # Decrease if missing quiet speech
@@ -79,8 +89,9 @@ class TurnTakingConfig:
 
 class LLMConfig:
     """LLM configuration (REUSED)"""
-    MODEL_NAME = "qwen2.5:3b"  # Fast conversational model (download: ollama pull qwen2.5:3b)
-                               # Alternative: "llama3.2:3b" or "qwen2.5:7b" (better quality, slower)
+    MODEL_NAME = "qwen2.5:3b"  # Temporarily using old model until qwen2.5:3b is downloaded
+                               # TODO: Download on server: ollama pull qwen2.5:3b
+                               # Then change to: MODEL_NAME = "qwen2.5:3b"
     BASE_URL = "http://localhost:11434"
     TIMEOUT = 30
 
