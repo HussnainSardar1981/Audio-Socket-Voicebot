@@ -132,9 +132,10 @@ class AudioSocketVoicebot:
                 if self.interruption_enabled:
                     energy = self._calculate_energy(pcm_data)
 
-                    # DYNAMIC THRESHOLD: Multiply by 3.5x during AI speaking to ignore echo
+                    # DYNAMIC THRESHOLD: Multiply by 2.5x during AI speaking to ignore echo
                     # Echo from bot's own voice will have lower energy than real user speech
-                    dynamic_threshold = TurnTakingConfig.INTERRUPTION_ENERGY_THRESHOLD * 3.5
+                    # 300 * 2.5 = 750 threshold during AI speaking (vs 300 during user turn)
+                    dynamic_threshold = TurnTakingConfig.INTERRUPTION_ENERGY_THRESHOLD * 2.5
 
                     if energy > dynamic_threshold:
                         # High energy detected - confirm it's real speech with VAD
@@ -259,17 +260,22 @@ class AudioSocketVoicebot:
                 'content': transcript
             })
 
-            # Generate LLM response WITH STREAMING (speaks while generating)
+            # Generate LLM response WITH TRUE STREAMING (speaks while generating)
             logger.info("Generating response (streaming)...")
             full_response = ""
 
-            # Stream sentences and speak each one immediately
-            def generate_sentences():
-                """Generator wrapper for streaming"""
+            # Create generator in thread, then iterate and speak each sentence IMMEDIATELY
+            def get_generator():
+                """Get the streaming generator"""
                 return self.llm.generate_response_streaming(transcript)
 
-            for sentence in await asyncio.to_thread(lambda: list(generate_sentences())):
-                # Speak this sentence immediately while LLM generates next sentence
+            # Get the generator
+            sentence_generator = await asyncio.to_thread(get_generator)
+
+            # NOW iterate through sentences and speak each one as it arrives
+            # This is TRUE streaming - we speak sentence 1 while LLM generates sentence 2
+            for sentence in sentence_generator:
+                # Got a sentence! Speak it immediately
                 await self._speak(sentence)
                 full_response += " " + sentence
 
@@ -304,6 +310,11 @@ class AudioSocketVoicebot:
             voice_type: Voice type (empathetic, technical, greeting, default)
         """
         try:
+            # Check if connection is still active before speaking
+            if not self.connection.active:
+                logger.warning("Connection closed - cannot speak")
+                return
+
             self.state = ConversationState.AI_SPEAKING
             self.interruption_requested = False  # Reset interruption flag
             logger.info(f"Bot speaking: {text}")
