@@ -65,19 +65,22 @@ class TurnTakingConfig:
                                                   # Increase if false interruptions
                                                   # Decrease if not detecting interruptions
 
-    INTERRUPTION_CONSECUTIVE_FRAMES = 3          # 60ms of speech to confirm interruption (3 frames @ 20ms)
+    INTERRUPTION_CONSECUTIVE_FRAMES = 6          # 120ms of speech to confirm interruption (6 frames @ 20ms)
+                                                  # INCREASED from 3 to reduce false interruptions from echo/noise
                                                   # Increase to reduce false interruptions
                                                   # Decrease for faster interruption response
 
     # ===== VAD Pre-filtering =====
-    VAD_ENERGY_THRESHOLD = 50                    # RMS energy to filter channel noise before VAD
+    VAD_ENERGY_THRESHOLD = 100                   # RMS energy to filter channel noise before VAD
+                                                  # INCREASED from 50 to 150 for phone line quality
                                                   # Increase if detecting too much background noise
                                                   # Decrease if missing quiet speech
 
 
 class LLMConfig:
     """LLM configuration (REUSED)"""
-    MODEL_NAME = "llama3.1:8b"
+    MODEL_NAME = "qwen2.5:3b"  # Fast conversational model (download: ollama pull qwen2.5:3b)
+                               # Alternative: "llama3.2:3b" or "qwen2.5:7b" (better quality, slower)
     BASE_URL = "http://localhost:11434"
     TIMEOUT = 30
 
