@@ -7,6 +7,7 @@ Loads all models once at startup for instant responses
 import time
 import logging
 import torch
+import threading
 from vosk import Model
 from kokoro import KPipeline
 import requests
@@ -20,6 +21,7 @@ class SharedModels:
     vosk_model = None
     kokoro_pipeline = None
     kokoro_device = None
+    kokoro_lock = threading.Lock()  # Thread safety for TTS synthesis across concurrent calls
     rag_client = None  # RAG client (singleton, loaded once at startup)
     models_loaded = False
 
