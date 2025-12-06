@@ -58,6 +58,9 @@ class AudioSocketVoicebot:
         self.state = ConversationState.IDLE
         self.customer_id = customer_id
 
+        # Connection ID for debugging concurrent calls
+        self.connection_id = connection.peer_address
+
         # Initialize components (ALL values from config - no hardcoding!)
         self.vad = VADProcessor(
             sample_rate=AudioConfig.VAD_SAMPLE_RATE,
@@ -100,7 +103,7 @@ class AudioSocketVoicebot:
         self.consecutive_speech_frames = 0
         self.interruption_requested = False  # Flag to stop audio playback
 
-        logger.info(f"AudioSocket Voicebot initialized (customer: {customer_id or 'None'})")
+        logger.info(f"[{self.connection_id}] AudioSocket Voicebot initialized (customer: {customer_id or 'None'})")
 
     async def start(self):
         """Start voicebot conversation"""
