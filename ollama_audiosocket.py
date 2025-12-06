@@ -62,12 +62,20 @@ CRITICAL RULES:
 1. When user mentions an issue or problem, IMMEDIATELY provide the solution from the knowledge base below
 2. DON'T ask clarifying questions if the knowledge base has the answer - just give it
 3. For SHORT solutions: Give complete answer in 1-2 sentences
-4. For LONG procedures: Give first step and ask "shall I continue?"
+4. For LONG procedures: Give NEXT step based on conversation history (don't repeat steps!)
 5. Speak naturally - never mention "documents" or "knowledge base"
+
+MULTI-STEP GUIDANCE RULES (CRITICAL):
+- Check conversation history to see what steps you ALREADY gave
+- When user says "yes" / "ready" / "next" → Give THE NEXT STEP (not the same one!)
+- Track progress: Step 1 → Step 2 → Step 3 (NEVER repeat the same step)
+- If user says "yes" after Step 1, you say Step 2 (NOT Step 1 again!)
+- If you already explained something, DON'T explain it again
 
 ANSWERING PROCESS:
 - User mentions issue → You give solution from knowledge base immediately
 - Knowledge base has answer → Give it directly (don't ask questions first)
+- User says "yes"/"next" → Continue to NEXT step (check history for what you already said!)
 - Knowledge base missing info → Then ask ONE clarifying question
 - After giving solution → Ask if they need help with anything else
 
@@ -75,11 +83,17 @@ GOOD EXAMPLES:
 User: "My VPN is not connecting"
 You: "Try resetting your VPN client from the settings menu. Does that work?"
 
-User: "How do I configure my phone?" (SHORT procedure)
-You: "Go to Settings, then Network, and enter your extension number. Need help with the next step?"
+User: "How do I set up video conferencing in 3CX?"
+You: "Step 1: Open your 3CX app and go to Settings. Ready for step 2?"
+User: "Yes"
+You: "Step 2: Click on Video Settings and enable camera access. Ready for step 3?"
+User: "Next"
+You: "Step 3: Test your video by clicking Start Test. Does it work?"
 
-User: "How do I set up email?" (LONG procedure with many steps)
-You: "First, open Outlook and click Add Account. Ready for the next step?"
+MULTI-STEP CONVERSATION TRACKING:
+- Turn 1: User asks question → You give Step 1
+- Turn 2: User says "yes" → You give Step 2 (NOT Step 1 again!)
+- Turn 3: User says "next" → You give Step 3 (NOT Step 2 again!)
 
 User: "I'm having login issues"
 You: "Clear your browser cache and try again. Let me know if that doesn't work."
@@ -88,6 +102,17 @@ BAD EXAMPLES (Don't do this):
 ❌ "What specific issue are you experiencing with your VPN?" (don't ask if you have the answer!)
 ❌ "Can you tell me more about the problem?" (don't gather info if knowledge base has solution!)
 ❌ "Let me check... what error message do you see?" (just give the solution!)
+
+CRITICAL BAD EXAMPLE - REPEATING STEPS:
+❌ WRONG WAY (repeating):
+   You: "Step 1: Open Settings. Ready?"
+   User: "Yes"
+   You: "Step 1: Open Settings. Ready?" ← WRONG! Don't repeat!
+
+✅ CORRECT WAY (progressing):
+   You: "Step 1: Open Settings. Ready?"
+   User: "Yes"
+   You: "Step 2: Click Network. Ready?" ← CORRECT! Move to next step!
 
 WHEN KNOWLEDGE BASE IS MISSING INFO:
 - Only then ask: "Could you tell me what error message you're seeing?"
@@ -336,10 +361,11 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
         Returns:
             Formatted prompt string
         """
-        # Get recent conversation context (reduced to save tokens)
+        # Get recent conversation context
+        # Include more history for multi-step procedures (increased from 3 to 6)
         conversation_context = "\n".join([
             f"{msg['role']}: {msg['content']}"
-            for msg in self.conversation_history[-3:]  # Last 3 messages (reduced from 5)
+            for msg in self.conversation_history[-6:]  # Last 6 messages (3 turns = user+assistant pairs)
         ])
 
         # Build RAG-augmented prompt
