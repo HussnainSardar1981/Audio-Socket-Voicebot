@@ -86,7 +86,8 @@ Respond in 1-3 sentences unless more detail is specifically requested."""
             from chroma_rag_client import get_rag_client
 
             # Get ChromaDB path from config
-            chroma_path = RAGConfig.get_chroma_db_path()
+            # Note: {customer_id} is a LITERAL folder name, not a placeholder
+            chroma_path = RAGConfig.CHROMA_DB_PATH
 
             # Get or create singleton RAG client
             rag_client = get_rag_client(
