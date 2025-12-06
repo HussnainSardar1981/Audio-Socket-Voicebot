@@ -143,22 +143,27 @@ class KokoroTTSClient:
             # Enhance text for natural speech
             enhanced_text = self._enhance_text_for_speech(text, voice_type)
 
-            logger.info(f"🎵 Kokoro TTS: voice={kokoro_voice}, type={voice_type}")
+            logger.info(f" Kokoro TTS: voice={kokoro_voice}, type={voice_type}")
             logger.debug(f"Synthesizing: '{text[:50]}{'...' if len(text) > 50 else ''}'")
 
             # Generate audio using KPipeline (yields chunks at 24kHz)
-            generator = self.pipeline(enhanced_text, voice=kokoro_voice)
+            # CRITICAL: Use lock for thread safety across concurrent calls
+            # This ensures multiple calls don't interfere with the shared neural network
+            from model_warmup import SharedModels
 
-            # Collect audio chunks
-            audio_chunks = []
-            for i, (gs, ps, audio_chunk) in enumerate(generator):
-                audio_chunks.append(audio_chunk)
+            with SharedModels.kokoro_lock:
+                generator = self.pipeline(enhanced_text, voice=kokoro_voice)
+
+                # Collect audio chunks
+                audio_chunks = []
+                for i, (gs, ps, audio_chunk) in enumerate(generator):
+                    audio_chunks.append(audio_chunk)
 
             if not audio_chunks:
                 logger.error("No audio generated from Kokoro")
                 return b''
 
-            # Concatenate chunks
+            # Concatenate chunks (outside lock - this is just numpy operations)
             full_audio = np.concatenate(audio_chunks)
 
             # Create temp directory if needed
