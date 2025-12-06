@@ -40,13 +40,23 @@ class AudioSocketVoicebot:
     - AudioSocket bidirectional audio
     - VAD for speech detection
     - Vosk ASR for transcription
-    - Ollama LLM for responses
+    - Ollama LLM for responses (with optional RAG)
     - Kokoro TTS for synthesis
     """
 
-    def __init__(self, connection: AudioSocketConnection):
+    def __init__(self, connection: AudioSocketConnection, customer_id: Optional[str] = None):
+        """
+        Initialize AudioSocket Voicebot
+
+        Args:
+            connection: AudioSocket connection
+            customer_id: Customer ID for RAG retrieval (optional)
+                        Example: "stuart_dean", "skisafe", "millennium_escalators"
+                        If None, RAG is disabled (LLM-only mode)
+        """
         self.connection = connection
         self.state = ConversationState.IDLE
+        self.customer_id = customer_id
 
         # Initialize components
         self.vad = VADProcessor(
@@ -70,9 +80,10 @@ class AudioSocketVoicebot:
             shared_pipeline=SharedModels.kokoro_pipeline,
             shared_device=SharedModels.kokoro_device
         )
+
         # Initialize LLM client with optional customer_id for RAG
-        # Set customer_id to enable RAG knowledge base retrieval
-        self.llm = OllamaClient(customer_id=None)  # Set to customer ID like "skiface" for RAG
+        # RAG will be automatically enabled if customer_id is provided
+        self.llm = OllamaClient(customer_id=customer_id)
 
         # Conversation history for ticket creation
         self.conversation_messages = []
@@ -87,7 +98,7 @@ class AudioSocketVoicebot:
         self.consecutive_speech_frames = 0
         self.interruption_requested = False  # Flag to stop audio playback
 
-        logger.info("AudioSocket Voicebot initialized")
+        logger.info(f"AudioSocket Voicebot initialized (customer: {customer_id or 'None'})")
 
     async def start(self):
         """Start voicebot conversation"""
@@ -506,8 +517,28 @@ async def main():
             # Give time for UUID to be received
             await asyncio.sleep(0.2)
 
-            # Create voicebot for this connection
-            voicebot = AudioSocketVoicebot(connection)
+            # ===== CUSTOMER IDENTIFICATION FOR RAG =====
+            # TODO: Implement customer identification logic based on:
+            # - Caller phone number (from connection.peer_address)
+            # - Asterisk variables (from connection.session_uuid)
+            # - Database lookup
+            # - DID (Direct Inward Dialing) number called
+            #
+            # For now, set customer_id to None (RAG disabled) or a specific customer for testing
+            customer_id = None  # Default: RAG disabled (LLM-only mode)
+
+            # Example: Enable RAG for testing
+            # customer_id = "stuart_dean"  # Uncomment to test RAG with stuart_dean collection
+            # customer_id = "skisafe"      # Uncomment to test RAG with skisafe collection
+
+            # Example: Customer identification from phone number
+            # caller_number = connection.peer_address[0] if connection.peer_address else None
+            # customer_id = lookup_customer_by_phone(caller_number)
+
+            logger.info(f"Customer ID for this call: {customer_id or 'None (RAG disabled)'}")
+
+            # Create voicebot for this connection with customer_id
+            voicebot = AudioSocketVoicebot(connection, customer_id=customer_id)
 
             # Check if this is a Zabbix alert call
             call_id = None
