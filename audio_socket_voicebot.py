@@ -100,14 +100,45 @@ class AudioSocketVoicebot:
 
         logger.info(f"AudioSocket Voicebot initialized (customer: {customer_id or 'None'})")
 
-    async def start(self):
-        """Start voicebot conversation"""
+    async def start(self, enable_customer_selection: bool = False):
+        """
+        Start voicebot conversation
+
+        Args:
+            enable_customer_selection: If True, allows selecting customer via DTMF for testing
+        """
         try:
             # Set audio callback
             self.connection.on_audio_received = self._on_audio_frame
 
-            # Send greeting
-            await self._speak("Hello! How can I help you today?", voice_type="greeting")
+            # TESTING MODE: Allow customer selection via DTMF
+            if enable_customer_selection and self.customer_id is None:
+                await self._speak("Welcome to RAG testing. Press 1 for Stuart Dean, Press 2 for Ski Safe, or Press 3 to continue without RAG")
+
+                # Wait for DTMF selection
+                dtmf_digit = await self._wait_for_dtmf(timeout=10)
+
+                if dtmf_digit == '1':
+                    self.customer_id = "stuart_dean"
+                    logger.info("Customer selected via DTMF: stuart_dean")
+                elif dtmf_digit == '2':
+                    self.customer_id = "skisafe"
+                    logger.info("Customer selected via DTMF: skisafe")
+                else:
+                    self.customer_id = None
+                    logger.info("No customer selected - RAG disabled")
+
+                # Reinitialize LLM with selected customer
+                from ollama_audiosocket import OllamaClient
+                self.llm = OllamaClient(customer_id=self.customer_id)
+
+                if self.customer_id:
+                    await self._speak(f"RAG enabled for {self.customer_id.replace('_', ' ')}. How can I help you?")
+                else:
+                    await self._speak("RAG disabled. How can I help you?")
+            else:
+                # Normal greeting
+                await self._speak("Hello! How can I help you today?", voice_type="greeting")
 
             # Keep running until connection closes
             while self.connection.active:
@@ -527,7 +558,7 @@ async def main():
             # For now, set customer_id to None (RAG disabled) or a specific customer for testing
             customer_id = None  # Default: RAG disabled (LLM-only mode)
 
-            # Example: Enable RAG for testing
+            # Example: Enable RAG for testing with specific customer
             # customer_id = "stuart_dean"  # Uncomment to test RAG with stuart_dean collection
             # customer_id = "skisafe"      # Uncomment to test RAG with skisafe collection
 
@@ -557,7 +588,9 @@ async def main():
                 await voicebot.start_alert_call(call_id)
             else:
                 # Normal customer call
-                await voicebot.start()
+                # TESTING: Set enable_customer_selection=True to select customer via DTMF
+                enable_testing_mode = True  # Set to False for production
+                await voicebot.start(enable_customer_selection=enable_testing_mode)
 
         # Start voicebot handler in background
         asyncio.create_task(handle_voicebot())
