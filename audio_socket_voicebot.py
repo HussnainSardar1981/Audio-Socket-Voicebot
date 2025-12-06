@@ -58,12 +58,13 @@ class AudioSocketVoicebot:
         self.state = ConversationState.IDLE
         self.customer_id = customer_id
 
-        # Initialize components
+        # Initialize components (ALL values from config - no hardcoding!)
         self.vad = VADProcessor(
             sample_rate=AudioConfig.VAD_SAMPLE_RATE,
             frame_duration_ms=AudioConfig.VAD_FRAME_DURATION_MS,
             aggressiveness=AudioConfig.VAD_AGGRESSIVENESS,
-            speech_start_frames=8  # Require 8 frames (160ms) to prevent backchanneling false positives
+            speech_start_frames=AudioConfig.VAD_SPEECH_START_FRAMES,
+            speech_end_frames=AudioConfig.VAD_SPEECH_END_FRAMES
         )
 
         # Use shared pre-loaded Vosk model
