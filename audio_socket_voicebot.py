@@ -62,7 +62,8 @@ class AudioSocketVoicebot:
         self.vad = VADProcessor(
             sample_rate=AudioConfig.VAD_SAMPLE_RATE,
             frame_duration_ms=AudioConfig.VAD_FRAME_DURATION_MS,
-            aggressiveness=AudioConfig.VAD_AGGRESSIVENESS
+            aggressiveness=AudioConfig.VAD_AGGRESSIVENESS,
+            speech_start_frames=8  # Require 8 frames (160ms) to prevent backchanneling false positives
         )
 
         # Use shared pre-loaded Vosk model
@@ -126,16 +127,29 @@ class AudioSocketVoicebot:
             pcm_data: 320 bytes of int16 LE PCM @ 8kHz
         """
         try:
-            # Check for interruption during AI speaking
+            # Check for interruption during AI speaking (CRITICAL: ECHO CANCELLATION)
             if self.state == ConversationState.AI_SPEAKING:
                 if self.interruption_enabled:
                     energy = self._calculate_energy(pcm_data)
-                    if energy > TurnTakingConfig.INTERRUPTION_ENERGY_THRESHOLD:
-                        self.consecutive_speech_frames += 1
-                        if self.consecutive_speech_frames >= TurnTakingConfig.INTERRUPTION_CONSECUTIVE_FRAMES:
-                            logger.info("User interrupted bot")
-                            self._handle_interruption()
+
+                    # DYNAMIC THRESHOLD: Multiply by 3.5x during AI speaking to ignore echo
+                    # Echo from bot's own voice will have lower energy than real user speech
+                    dynamic_threshold = TurnTakingConfig.INTERRUPTION_ENERGY_THRESHOLD * 3.5
+
+                    if energy > dynamic_threshold:
+                        # High energy detected - confirm it's real speech with VAD
+                        is_real_speech = self.vad.process_frame(pcm_data)
+
+                        if is_real_speech:
+                            self.consecutive_speech_frames += 1
+                            if self.consecutive_speech_frames >= TurnTakingConfig.INTERRUPTION_CONSECUTIVE_FRAMES:
+                                logger.info(f"🎤 User interrupted bot (energy: {energy:.0f} > {dynamic_threshold:.0f})")
+                                self._handle_interruption()
+                        else:
+                            # High energy but not speech (noise)
+                            self.consecutive_speech_frames = 0
                     else:
+                        # Low energy - likely echo or silence
                         self.consecutive_speech_frames = 0
                 return  # Don't process audio during bot speaking
 
